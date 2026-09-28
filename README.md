@@ -4,10 +4,13 @@
 
 **Status:** Draft for design feedback · **Date:** 2026-09-28 · **Scope of first pilot:** live video-to-video and Live Runner jobs
 
+**New to AT Protocol?** Start with the [AT Protocol primer for Livepeer operators](at-protocol-primer.md).
+
 **Appendices:**
 [A. Record schemas](appendix-a-record-schemas.md) ·
 [B. Change list](appendix-b-change-list.md) ·
-[C. Decisions and open questions](appendix-c-decisions-and-open-questions.md)
+[C. Decisions and open questions](appendix-c-decisions-and-open-questions.md) ·
+[D. Sequence diagrams](appendix-d-sequence-diagrams.md)
 
 ---
 
@@ -61,31 +64,143 @@ R7 deserves emphasis. If publishing is difficult, only large operators will do i
 
 ---
 
-## 2. The design in one picture
+## 2. Architecture
 
-The design has three layers. Each answers a different question.
+### 2.1 Three layers
 
+The design has three layers. Each answers a different question, and each has a different source of authority.
+
+```mermaid
+flowchart TB
+  subgraph L3["Layer 3 · Aggregators and scorers — what is probably true?"]
+    direction LR
+    AGG["Aggregators<br/>such as NaaP"]
+    SCO["Scorers"]
+    LAB["Labelers"]
+  end
+  subgraph L2["Layer 2 · AT Protocol repositories — what does each operator claim?"]
+    direction LR
+    RO["Orchestrator repos<br/>binding · fleet · quotes · service reports"]
+    RG["Gateway repos<br/>observations"]
+    RS["Signer repos<br/>ledger digests · relayed observations"]
+    RP["Prober repos<br/>probe results"]
+    RX["Scorer and labeler repos<br/>scores · flags"]
+  end
+  subgraph L1["Layer 1 · Arbitrum — who participates, and who paid whom?"]
+    direction LR
+    BM["BondingManager"]
+    SR["ServiceRegistry<br/>AIServiceRegistry"]
+    TB["TicketBroker"]
+    RM["RoundsManager"]
+  end
+  L3 -->|"read and verify"| L2
+  L3 -->|"read"| L1
+  L2 -.->|"records cite addresses,<br/>rounds, and ticket values"| L1
 ```
-LAYER 1 — CHAIN (Arbitrum)          Who is a participant? Who paid whom?
-  BondingManager       active orchestrators, stake, rewards
-  ServiceRegistry      orchestrator service URIs (transcoding)
-  AIServiceRegistry    orchestrator service URIs (AI)
-  TicketBroker         gateway and signer deposits; winning-ticket redemptions
-  RoundsManager        rounds, used as a shared clock
 
-LAYER 2 — AT PROTOCOL REPOSITORIES  What does each operator claim?
-  orchestrator repos   fleet, signed price quotes, service reports
-  gateway repos        observations of orchestrators
-  signer repos         ledger digests; observations relayed for keyless clients
-  prober repos         results of test traffic
-  scorer repos         published scores and flags
+- **Layer 1, the chain,** is the authority on who participates and who paid whom. Nothing in this proposal changes it.
+- **Layer 2, the repositories,** holds what each participant claims. Every record is signed by its author and can be collected by anyone.
+- **Layer 3, the aggregators and scorers,** decides what is probably true by checking layer 2 claims against each other and against layer 1. Its outputs are themselves published to layer 2, as scores and flags, so they are also signed and attributable.
 
-LAYER 3 — AGGREGATORS AND SCORERS   What is probably true?
-  Anyone may read layers 1 and 2, check claims against each other,
-  and publish scores. Gateways and signers choose which scorers to trust.
+On-chain data is never copied into AT Protocol as a source of truth. Records in layer 2 refer to on-chain facts — addresses, rounds, ticket values — and layer 3 joins the two.
+
+### 2.2 Components
+
+Two diagrams show who runs what. The first shows how jobs and payments flow. Almost all of it exists today; the proposal adds measurement to it, not new traffic.
+
+```mermaid
+flowchart LR
+  APP["Application using<br/>the Python SDK"]
+  GW["go-livepeer gateway"]
+  PR["Prober"]
+  SG["Remote signer<br/>and clearinghouse"]
+  OR["go-livepeer orchestrator<br/>payment counters · runner proxy"]
+  RN["Live runners<br/>local and pool members"]
+  TB[("TicketBroker<br/>on Arbitrum")]
+
+  APP -->|"ticket requests"| SG
+  APP ==>|"jobs and tickets"| OR
+  GW ==>|"jobs and tickets"| OR
+  PR ==>|"test jobs and tickets"| OR
+  OR --- RN
+  SG -->|"deposit"| TB
+  GW -->|"deposit"| TB
+  OR -->|"redeem winning tickets"| TB
 ```
 
-On-chain data is never copied into AT Protocol as a source of truth. Records in layer 2 refer to on-chain facts — addresses, rounds, transaction hashes — and aggregators in layer 3 join the two.
+The second shows how data is published and read. Each participant writes to its own PDS. Everything to the right of the PDSs can be run by anyone, in any number of copies.
+
+```mermaid
+flowchart LR
+  subgraph SRC["Where records come from"]
+    direction TB
+    O1["Orchestrator<br/>counters and runner proxy"]
+    G1["Gateway<br/>Kafka events via sidecar"]
+    S1["Remote signer<br/>ledger and client summaries"]
+    P1["Prober<br/>test results"]
+  end
+
+  subgraph PDSS["Each participant's own PDS"]
+    direction TB
+    O2[("Orchestrator PDS")]
+    G2[("Gateway PDS")]
+    S2[("Signer PDS")]
+    P2[("Prober PDS")]
+  end
+
+  subgraph ANY["Run by anyone"]
+    direction TB
+    RL["Relay, optional"]
+    MR["Mirrors and<br/>cold archive"]
+    AG["Aggregators"]
+    IX["Chain indexer"]
+    SC["Scorers and labelers"]
+    SP[("Scorer PDS")]
+  end
+
+  CH[("Arbitrum")]
+  USE["Gateways and signers<br/>choosing orchestrators"]
+
+  O1 --> O2
+  G1 --> G2
+  S1 --> S2
+  P1 --> P2
+  O2 -.-> RL
+  G2 -.-> RL
+  S2 -.-> RL
+  P2 -.-> RL
+  RL -.-> MR
+  RL -.-> AG
+  CH --> IX --> AG
+  AG --> SC --> SP
+  SP -.->|"trusted scores"| USE
+```
+
+| Component | Run by | New or existing | Needed from |
+|---|---|---|---|
+| go-livepeer orchestrator: payment counters and runner proxy measurements | Orchestrator operator | Existing software, new instrumentation | Phase A |
+| Publisher and PDS | Orchestrator operator | New; intended to ship inside go-livepeer | Phase A |
+| Telemetry sidecar and PDS | Gateway operator | New; reads go-livepeer's existing Kafka events | Phase A |
+| Remote signer: ledger digests, relayed observations, ranked discovery | Signer operator | Existing software, new features | Phase A and B |
+| Python SDK telemetry module | Application developer | New module in the existing SDK | Phase A and B |
+| Chain indexer | Anyone | New; can build on the clearinghouse's TicketBroker listener | Phase A |
+| Relay | Anyone | Existing AT Protocol software; optional at pilot scale | Optional |
+| Mirrors and cold archive | Anyone; cold archive treasury-funded | Existing AT Protocol software plus an export job | Phase A and B |
+| Aggregators | Anyone; NaaP is the first | NaaP gains a repository ingest path | Phase A |
+| Scorers and labelers | Anyone; Cloud SPE and Livepeer Inc first | New | Phase A |
+
+Every component in the "run by anyone" group can have several independent operators. None of them is required for another participant to publish or read data.
+
+### 2.3 How the pieces interact
+
+[Appendix D](appendix-d-sequence-diagrams.md) traces the main flows step by step:
+
+1. [An operator joins](appendix-d-sequence-diagrams.md#d1-an-operator-joins): publishing an identity binding and fleet record, and being discovered by aggregators.
+2. [A live video-to-video session](appendix-d-sequence-diagrams.md#d2-a-live-video-to-video-session): from signed quote to published gateway observation and orchestrator service report.
+3. [A Live Runner session](appendix-d-sequence-diagrams.md#d3-a-live-runner-session): from signed discovery through payment challenge to a signer-relayed observation.
+4. [Corroboration and scoring](appendix-d-sequence-diagrams.md#d4-corroboration-and-scoring): how an aggregator matches both sides of a session and checks payments on-chain.
+5. [Scores in selection](appendix-d-sequence-diagrams.md#d5-scores-in-selection): how gateways and signers use scores in Phase B.
+6. [Preserving history](appendix-d-sequence-diagrams.md#d6-preserving-history): mirrors, cold exports, and pruning.
 
 ---
 
@@ -93,7 +208,7 @@ On-chain data is never copied into AT Protocol as a source of truth. Records in 
 
 ### 3.1 The parts we use
 
-AT Protocol was built for social media, but its core is a general mechanism for publishing signed data that anyone can collect. We use five of its parts and none of its social features.
+AT Protocol was built for social media, but its core is a general mechanism for publishing signed data that anyone can collect. We use five of its parts and none of its social features. The [primer](at-protocol-primer.md) explains each part in more depth.
 
 - **Decentralized identifiers (DIDs).** Each account is identified by a DID, whose document names the account's current signing key and the server hosting its data. We propose `did:web` identifiers derived from each orchestrator's own hostname, which avoids AT Protocol's central identity directory (see [§3.3](#33-where-at-protocol-falls-short)).
 - **Repositories.** Each account owns one repository: a collection of JSON records organized as a Merkle tree, whose root is signed on every change. Anyone holding a copy can prove that a record was published by the account and has not been altered.
