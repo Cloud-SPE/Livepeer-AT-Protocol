@@ -239,3 +239,35 @@ sequenceDiagram
 ```
 
 One design question remains open here: raw events contain the private fields that summaries omit, so the specification must define how a publisher redacts a batch while keeping the Merkle root verifiable. The simplest approach is to compute the root over already-redacted events.
+
+## D.8 A leaked canary
+
+A probe carries a test credential issued to one orchestrator only. The prober commits to it publicly before the job runs, so if the credential is ever used, anyone can confirm which orchestrator received it. The same probe also checks TLS certificates and DNS answers from inside the sandbox; those results go into the same `probe.result`.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant Pr as Prober
+  participant PP as Prober's PDS
+  participant O as Orchestrator
+  participant CM as Canary monitor
+  participant Lab as Labeler
+  participant A as Allocator or application
+
+  Pr->>Pr: create canary K for orchestrator O, with random nonce n
+  Pr->>PP: write probe.result with commitment hash(K, O, n)
+  Pr->>O: send probe job carrying K
+  O-->>Pr: job result, as for any workload
+  Note over O: O copies K out of the sandbox
+  O->>CM: K is used, by O or by anyone O gave it to
+  CM->>CM: publish signed evidence of use under its own identity
+  Pr->>PP: write probe.canaryReveal with K, O, n, and the evidence
+  Lab->>PP: read the commitment and the reveal
+  Lab->>Lab: check that hash(K, O, n) matches a commitment written before the use
+  Lab->>Lab: publish secret-misuse label on O
+  A->>Lab: read labels from labelers it trusts
+  A->>A: exclude O from placement
+  Note over Pr,Lab: The commitment proves where K went. Evidence of use still depends on the canary monitor.
+```
+
+A canary catches only secrets that are used. An orchestrator that copies secrets and never uses them, or recognizes probe traffic and leaves it alone, is not caught this way (proposal [§6.7](README.md#67-host-abuse)).

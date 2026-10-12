@@ -20,6 +20,9 @@
 | D12 | Phase A compares measurements with NaaP, not scores. The NaaP SLA formula becomes the first published formula, `sla-v1`, without special standing. | Measurements should agree between honest pipelines; formulas are policy and must be allowed to compete. |
 | D13 | Clients in scope are the Python gateway SDK and go-livepeer gateways. | These are the public clients in use. |
 | D14 | Transcoding is outside the first pilot. Livepeer Inc's stream tester becomes its first prober when it enters scope. | Keeps the pilot small; the stream tester covers transcoding only. |
+| D15 | Host abuse is detected and recorded, not prevented. Applications that handle sensitive data use only orchestrators they have vetted until attestation is affordable. | No published record can prove an orchestrator left an application's secrets alone. Test traffic can catch some abuse, and labels make each catch follow the orchestrator to every consumer. |
+| D16 | Vetting is published as `approved` labels on orchestrators and workload versions, not kept in private lists. | Applications and allocators can share evidence without sharing a list, and no one depends on a single allocator's view. |
+| D17 | Host-level scanning on orchestrator machines is not proposed. | The operator controls the machine being scanned, so a scan's report is another self-report. |
 
 ## C.2 Context the decisions rest on
 
@@ -60,3 +63,12 @@
 
 15. Which go-livepeer maintainers must review the changes, and in what order should the standalone changes be proposed?
 16. Should the embedded PDS live in go-livepeer itself or in a separate sidecar maintained alongside it?
+
+### Workload integrity
+
+17. Who runs canary monitoring, and in what form should evidence of use be published so that others can check it?
+18. How can canary secrets be made indistinguishable from real application secrets, given that an operator who recognizes them can leave them alone?
+19. Which TLS and DNS checks can a probe run without being recognizable as a probe?
+20. Should a workload version be identified by a container image digest, a signed release, or both?
+21. Which attestation technologies are affordable enough to support, and when should `attested` labels begin to affect selection?
+22. How should an allocator that serves several applications combine their approval and exclusion labels into one placement decision?

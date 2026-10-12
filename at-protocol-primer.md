@@ -119,7 +119,9 @@ The proposal calls its AppViews **aggregators**. At Livepeer's scale the cost co
 
 A **labeler** is an account that publishes signed **labels** about other accounts or records. A label is a short value, such as `!warn` or a custom term, attached to a subject and signed by the labeler. Consumers choose which labelers to subscribe to, and a label has no effect on anyone who does not subscribe.
 
-Bluesky uses labelers for moderation. The proposal uses the same mechanism for flags such as `self-dealing-suspected` and `report-mismatch`, and the same principle for scores: anyone may publish them, and each gateway and signer chooses whose to trust.
+Bluesky uses labelers for moderation. The proposal uses the same mechanism for flags such as `self-dealing-suspected` and `report-mismatch`, and the same principle for scores: anyone may publish them, and each gateway, signer, allocator, and application chooses whose to trust.
+
+Labels also carry judgments that telemetry cannot make by itself. If a test credential sent to one orchestrator is later used, a labeler can publish `secret-misuse` against that orchestrator, citing the evidence. An application can publish `approved` for the orchestrators it has vetted. An allocator subscribed to both labelers can exclude the first and prefer the second. One that does not subscribe is unaffected.
 
 ## 4. How much to trust it
 

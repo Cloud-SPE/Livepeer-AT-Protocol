@@ -22,7 +22,7 @@ We propose a different arrangement, in which each operator publishes its own dat
 
 1. **Every operator publishes signed records about its own work** — orchestrators, gateways, remote signers, and test-traffic probers — into a data repository it controls. The repository format, identity system, and sync protocol come from [AT Protocol](https://atproto.com), the open protocol behind Bluesky.
 2. **Livepeer's on-chain state decides who counts.** An orchestrator is legitimate if it is bonded and registered on Arbitrum; a gateway or signer is legitimate if it holds a ticket deposit. Nobody grants access to the data network, because the blockchain already records who the participants are.
-3. **Records are claims, not facts.** A record proves who said something, not that it is true. Truth comes from corroboration: gateway and orchestrator reports about the same sessions, payments visible on-chain, and independent test traffic. Anyone may compute scores from the public records, and every score must be recomputable from them.
+3. **Records are claims, not facts.** A record proves who said something, not that it is true. Truth comes from corroboration: gateway and orchestrator reports about the same sessions, payments visible on-chain, and independent test traffic. Anyone may compute scores from the public records, and every score must be recomputable from them. Test traffic can also detect some abuse of the host, such as leaked secrets, but nothing in this design prevents it.
 4. **Scores reach orchestrator selection gradually.** They begin in a shadow phase that measures whether they predict real outcomes, then become a filter, and only then a weight in selection.
 
 We are asking for feedback on the design before anything is built. The questions we most want answered are collected in [§14](#14-questions-for-reviewers).
@@ -201,6 +201,8 @@ Every component in the "run by anyone" group can have several independent operat
 4. [Corroboration and scoring](appendix-d-sequence-diagrams.md#d4-corroboration-and-scoring): how an aggregator matches both sides of a session and checks payments on-chain.
 5. [Scores in selection](appendix-d-sequence-diagrams.md#d5-scores-in-selection): how gateways and signers use scores in Phase B.
 6. [Preserving history](appendix-d-sequence-diagrams.md#d6-preserving-history): mirrors, cold exports, and pruning.
+7. [Auditing a summary](appendix-d-sequence-diagrams.md#d7-auditing-a-summary): checking a summary against its raw events.
+8. [A leaked canary](appendix-d-sequence-diagrams.md#d8-a-leaked-canary): from a probe's committed test secret to an orchestrator's exclusion.
 
 ---
 
@@ -327,7 +329,14 @@ Draft schemas for every record type are in [Appendix A](appendix-a-record-schema
 
 ## 6. Trust: from attributable claims to probable truth
 
-A signed record proves who made a claim. It does not prove the claim. An orchestrator can overstate its work; a gateway can understate a competitor's quality. The design therefore gives self-reports no weight on their own. Four kinds of evidence give them weight.
+A signed record proves who made a claim. It does not prove the claim. An orchestrator can overstate its work; a gateway can understate a competitor's quality. The design therefore gives self-reports no weight on their own.
+
+Two kinds of misbehavior need different treatment.
+
+- **Misrepresentation** is lying about the work: overstating sessions, advertising hardware that is not there, or reporting a competitor unfairly. Sections 6.1 to 6.6 address it, because each such lie can be checked against evidence the liar does not control.
+- **Host abuse** is misusing the machine the work runs on: reading an application's secrets, intercepting its TLS traffic with a custom root certificate, or answering its DNS queries from a resolver the operator controls. No record can disprove it; an orchestrator's statement that it took nothing is worth nothing. Section 6.7 describes how test traffic can detect some host abuse, and what it cannot detect.
+
+Against misrepresentation, four kinds of evidence give self-reports weight.
 
 ### 6.1 Two-sided reports
 
@@ -375,6 +384,26 @@ Nothing in this design eliminates self-dealing. We propose to detect it as well 
 
 Flagged relationships have their observations down-weighted, not discarded. Diverse gateways and probers mitigate the problem; they do not solve it.
 
+### 6.7 Host abuse
+
+Applications run in a sandbox on hardware the orchestrator controls. Stopping the orchestrator from reading or tampering with them requires sandboxing, hardware attestation, or confidential computing, and this design provides none of those. What it can do is detect some abuse, tie each detection to an on-chain identity, and keep the evidence where the operator cannot delete it.
+
+**Checks from inside the sandbox.** A probe is a workload like any other. It runs in the same sandbox as a real application and sees the same network, so it can check for the abuse a real application would suffer:
+
+- **Canary secrets.** Each probe carries credentials, such as API keys and database passwords, that look real, are issued to one orchestrator only, and are monitored for use. If one is ever used, the leak traces to the orchestrator that received it.
+- **TLS interception.** The probe connects to endpoints its operator controls and compares the certificate it receives with the one it expects. Interception through a custom root certificate shows up as a mismatch.
+- **DNS tampering.** The probe resolves names whose correct answers it knows in advance.
+
+**Evidence anyone can check.** An accusation should not rest on the prober's word. When a prober issues a canary, it publishes a commitment in its `probe.result`: a hash of the canary, the orchestrator's address, and a random nonce. If the canary is later used, the prober publishes the three values in a `probe.canaryReveal` record. Anyone can then confirm that this canary went to this orchestrator, and that the prober recorded it before the leak rather than after. The commitment proves where the canary went; the evidence that it was used still comes from whoever monitors it, who must publish that evidence under its own identity. A labeler then publishes a `secret-misuse` label citing both. TLS and DNS results go in the same `probe.result`, and labelers flag repeated failures as `tls-interception` or `dns-tampering`.
+
+**What these checks cannot catch.**
+
+- A canary reveals a theft only when the stolen secret is used. An operator who copies secrets and never uses them, or uses only real applications' secrets, goes undetected.
+- An operator who recognizes probe traffic can behave honestly toward probes alone. The countermeasures in [§6.4](#64-test-traffic) apply: rotating addresses and traffic indistinguishable from real use.
+- Host-level scanning, such as intrusion detection software on the orchestrator's machine, would report through the operator, who controls the machine being scanned. We do not propose it.
+
+**Until attestation is affordable.** Applications that handle sensitive data should use only orchestrators they have vetted. In this design, vetting can be published as a label: an application, or a party it trusts, publishes an `approved` label on each orchestrator it has vetted, and names approved workload versions through the `version` field of the work key ([Appendix A §A.3](appendix-a-record-schemas.md#a3-shared-definitions)). When hardware attestation becomes affordable, each node in a fleet record can carry its attestation report, and verifiers can publish `attested` labels. Attestation then strengthens the same selection path, and nothing else in the design changes.
+
 ---
 
 ## 7. From scores to orchestrator selection
@@ -397,8 +426,9 @@ Selection happens in different places for different job types.
 
 - **Live video-to-video through go-livepeer gateways** uses the gateway's selection algorithm. There, the single-URL `-orchPerfStatsUrl` would become a list of trusted scorer DIDs.
 - **Live Runner** bypasses that algorithm entirely. Clients choose from a discovery list, and the Python SDK currently takes the first candidate. The remote signer's discovery endpoint already collects every orchestrator's runner list and filters it by price, which makes it the natural place to rank candidates by score for all the clients it serves. The SDK should also accept a ranked list.
+- **Allocators and applications** read scores and labels the same way. An allocator that places workloads for several independent applications can give each application its own policy, expressed as a subscription: the labelers the application trusts and the labels it acts on. One application might exclude any orchestrator a trusted labeler marks `secret-misuse`; another might admit only orchestrators it has marked `approved`. Applications then share evidence without sharing a list, and none depends on one allocator's view of the network.
 
-Each gateway and each signer chooses its own scorers. There is no network-wide ranking.
+Each gateway, signer, allocator, and application chooses its own scorers and labelers. There is no network-wide ranking.
 
 ### 7.3 Proving the new pipeline counts correctly
 
@@ -494,6 +524,7 @@ Pool runners currently authenticate with a secret shared by the whole pool, so a
 
 - **It does not affect stake or slashing.** The data informs selection, explorers, and delegators. Once data can cost an operator stake, the incentive to game it rises sharply. We propose to record this as an explicit non-goal in the governing LIP.
 - **It does not make claims trustless.** It makes them attributable and checkable, and relies on corroboration to separate the probable from the doubtful.
+- **It does not protect workload confidentiality.** It cannot stop an orchestrator from reading an application's secrets or tampering with its traffic; that requires sandboxing and attestation. It detects some such abuse through test traffic and keeps a durable record of what it finds ([§6.7](#67-host-abuse)).
 - **It does not publish raw events.** Raw events stay with operators, committed to by Merkle roots.
 - **It does not replace chain state.** The chain remains the authority on who participates and who paid whom.
 - **It does not cover transcoding in the first pilot.** Transcoding follows once the pilot's two job families work, with Livepeer Inc's stream tester as its first prober.
@@ -525,5 +556,7 @@ We would value feedback on any part of the design, and especially on these quest
 7. **Phase criteria.** What evidence would persuade you that scores are ready to filter, and later to weight, orchestrator selection?
 8. **History.** Who should operate mirrors and cold storage, and should cold exports be anchored on-chain?
 9. **Fleet record.** Does the proposed fleet record describe how you actually run your nodes?
+10. **Host abuse.** Which checks from inside the sandbox would you accept as evidence of host abuse, and which others are worth running?
+11. **Approval labels.** Would applications and allocators publish and act on labels for approved orchestrators and workload versions, instead of keeping private lists?
 
 Decisions already taken, and the questions still open, are listed in [Appendix C](appendix-c-decisions-and-open-questions.md).

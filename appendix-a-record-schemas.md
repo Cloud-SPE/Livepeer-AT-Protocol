@@ -26,7 +26,8 @@ The Lexicon JSON below is abbreviated where fields repeat a shared definition. D
 | `network.livepeer.orch.serviceReport` | Orchestrator | TID | Five-minute summary of work performed and payment received |
 | `network.livepeer.gateway.observation` | Gateway or signer | TID | Five-minute summary of the gateway's experience with one orchestrator |
 | `network.livepeer.signer.ledgerDigest` | Remote signer | TID | Per-round summary of payments authorized |
-| `network.livepeer.probe.result` | Prober | TID | Summary of test traffic sent to one orchestrator |
+| `network.livepeer.probe.result` | Prober | TID | Summary of test traffic sent to one orchestrator, with integrity-check results and canary commitments |
+| `network.livepeer.probe.canaryReveal` | Prober | TID | Opens a canary commitment after the canary has been used |
 | `network.livepeer.score.published` | Scorer | TID | A score with its formula and inputs, so anyone can recompute it |
 
 Flags such as suspected self-dealing are published as standard AT Protocol labels (`com.atproto.label`), not as a new record type. [§A.12](#a12-flags-as-labels) lists the proposed label values.
@@ -70,7 +71,8 @@ Flags such as suspected self-dealing are published as standard AT Protocol label
       "properties": {
         "family": { "type": "ref", "ref": "#jobFamily" },
         "app": { "type": "string", "maxLength": 256 },
-        "model": { "type": "string", "maxLength": 256 }
+        "model": { "type": "string", "maxLength": 256 },
+        "version": { "type": "string", "maxLength": 256, "description": "The workload version: a container image digest or signed release identifier. Lets consumers approve or exclude specific versions. Optional for live-v2v pipelines that have no separate release." }
       }
     },
     "histogram": {
@@ -216,7 +218,19 @@ Delegations are optional. A keyless client that does not want a DID of its own i
         "geoCell": { "type": "string", "maxLength": 16, "description": "Declared coarse location. Self-declared; checked against measured latency." },
         "behindLoadBalancer": { "type": "string", "format": "uri", "description": "The shared entry point, if this node is reached through a geographic load balancer." },
         "apps": { "type": "array", "items": { "type": "string", "maxLength": 256 } },
-        "capacity": { "type": "integer", "minimum": 0 }
+        "capacity": { "type": "integer", "minimum": 0 },
+        "attestation": { "type": "ref", "ref": "#attestation" }
+      }
+    },
+    "attestation": {
+      "type": "object",
+      "description": "Reserved for nodes whose hardware supports remote attestation. Consumers must not trust it on the operator's word; verifiers check the report and publish an attested label.",
+      "required": ["format", "reportUri", "reportHash", "measuredAt"],
+      "properties": {
+        "format": { "type": "string", "knownValues": ["amd-sev-snp", "intel-tdx", "nvidia-cc"] },
+        "reportUri": { "type": "string", "format": "uri", "description": "Where the full attestation report can be fetched." },
+        "reportHash": { "type": "string", "maxLength": 64, "description": "SHA-256 of the report, hex-encoded." },
+        "measuredAt": { "type": "string", "format": "datetime" }
       }
     }
   }
@@ -462,7 +476,7 @@ One record per orchestrator node, payer, kind of work, and five-minute window. I
 
 ## A.11 `network.livepeer.probe.result` and `network.livepeer.score.published`
 
-A probe result has the same shape as a gateway observation, with one addition: the probe's test configuration, so readers can tell a short synthetic clip from a sustained load test.
+A probe result has the same shape as a gateway observation, with two additions: the probe's test configuration, so readers can tell a short synthetic clip from a sustained load test, and the results of integrity checks run from inside the sandbox (proposal [§6.7](README.md#67-host-abuse)).
 
 ```json
 {
@@ -477,7 +491,52 @@ A probe result has the same shape as a gateway observation, with one addition: t
         "required": ["observation", "testProfile"],
         "properties": {
           "observation": { "type": "ref", "ref": "network.livepeer.gateway.observation" },
-          "testProfile": { "type": "string", "maxLength": 128, "description": "Name of a published test profile, e.g. 'lv2v-512px-60s'." }
+          "testProfile": { "type": "string", "maxLength": 128, "description": "Name of a published test profile, e.g. 'lv2v-512px-60s'." },
+          "integrity": { "type": "ref", "ref": "#integrity" }
+        }
+      }
+    },
+    "integrity": {
+      "type": "object",
+      "description": "Checks run by the probe workload from inside the orchestrator's sandbox.",
+      "properties": {
+        "tlsChecks": { "type": "integer", "minimum": 0, "description": "Connections made to endpoints whose certificates the prober controls." },
+        "tlsMismatches": { "type": "integer", "minimum": 0, "description": "Connections that presented an unexpected certificate chain." },
+        "dnsChecks": { "type": "integer", "minimum": 0, "description": "Names resolved whose correct answers the prober knows." },
+        "dnsMismatches": { "type": "integer", "minimum": 0 },
+        "canaryCommitments": {
+          "type": "array",
+          "maxLength": 64,
+          "items": { "type": "string", "maxLength": 64 },
+          "description": "SHA-256 of (canary, orchestrator address, nonce) for each canary secret sent in this window, hex-encoded. Published before any use, so a later reveal proves where the canary went."
+        }
+      }
+    }
+  }
+}
+```
+
+A canary reveal opens one commitment after the canary has been used. The canary itself is a test credential with no value, so publishing it exposes nothing.
+
+```json
+{
+  "lexicon": 1,
+  "id": "network.livepeer.probe.canaryReveal",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["commitment", "probeResult", "canary", "orchestrator", "nonce", "useEvidence"],
+        "properties": {
+          "commitment": { "type": "string", "maxLength": 64 },
+          "probeResult": { "type": "string", "format": "at-uri", "description": "The probe.result record that published the commitment." },
+          "canary": { "type": "string", "maxLength": 512 },
+          "orchestrator": { "type": "ref", "ref": "network.livepeer.defs#ethAddress" },
+          "nonce": { "type": "string", "maxLength": 64 },
+          "useEvidence": { "type": "string", "format": "uri", "description": "Signed evidence of use, published by whoever monitors the canary, under its own identity." },
+          "firstUsedAt": { "type": "string", "format": "datetime" }
         }
       }
     }
@@ -534,5 +593,12 @@ Scorers and dedicated labelers publish flags with AT Protocol's standard label m
 | `location-mismatch` | Measured latency is inconsistent with declared location. |
 | `binding-invalid` | The DID-to-address binding failed verification. |
 | `probe-special-treatment` | Probe traffic performs markedly better than real traffic to the same orchestrator. |
+| `secret-misuse` | A canary sent to this orchestrator was used. The label cites the `probe.canaryReveal` record and the evidence of use. |
+| `tls-interception` | Probes on this orchestrator repeatedly received unexpected certificate chains. |
+| `dns-tampering` | Probes on this orchestrator repeatedly received wrong DNS answers. |
+| `approved` | The labeler has vetted this orchestrator, or a specific workload version, for its own use. Means only what the labeler's published policy says. |
+| `attested` | The labeler has verified a node's attestation report against its fleet record. |
+
+`secret-misuse`, `tls-interception` and `dns-tampering` report detected host abuse. `approved` and `attested` are positive labels, typically published by an application or allocator about the orchestrators it is willing to use. Absence of `secret-misuse` is not evidence of honesty; it means only that no canary has been caught.
 
 Labels are advisory. Each consumer decides which labelers to subscribe to and how to weigh their labels.
