@@ -69,7 +69,9 @@ AT Protocol supports two DID methods:
 
 **The proposal uses `did:plc` by default.** `did:web` would suit an orchestrator with a domain and a public certificate on port 443. Many orchestrators have neither: they serve on ports such as 8935, often on a bare IP address, with self-signed certificates.
 
-The directory's weakness is contained by the **binding**: a record, signed by the participant's Ethereum address, that names its DID and its repository's signing key. Readers trust only keys a binding names. A misbehaving directory could therefore send readers to the wrong place, but could not make them accept forged records. Applications, which usually have a domain, may choose `did:web` instead.
+Every change to a `did:plc` identity is an operation signed by one of the account's rotation keys, and anyone can fetch the full history of operations. The directory therefore cannot forge a key change. It can only withhold changes, or show different readers different histories.
+
+The directory's remaining weakness is contained by the **binding**: a record, signed by the participant's Ethereum address, that names its DID and its repository's signing key. Readers trust only keys a binding names. A misbehaving directory could therefore send readers to the wrong place, but could not make them accept forged records. Applications, which usually have a domain, may choose `did:web` instead.
 
 Bluesky accounts also have **handles**, human-readable names such as `alice.example.com`. The proposal does not need them.
 
@@ -83,14 +85,14 @@ at://did:plc:ab12cd34ef56gh78ij90kl12/network.livepeer.orch.serviceReport/202611
 
 The record key here is derived from the window the record covers: five minutes from 14:00. A republish of the same window replaces the record instead of adding a second one.
 
-The repository is organized as a **Merkle search tree**: a tree in which every node is identified by the hash of its contents, so the hash at the root summarizes every record. Each change produces a new root, and the account signs a **commit** over it. Two properties follow.
+The repository is organized as a **Merkle search tree**: a tree in which every node is identified by the hash of its contents, so the hash at the root summarizes every record. Each change produces a new root, and the account signs a **commit** over it. Signatures belong to commits, not to individual records: a record is verified through whichever commit the reader received it in. Two properties follow.
 
 - **Records are self-certifying.** Anyone holding a record, the tree nodes above it, and the signed commit can prove the account published it, without trusting whoever handed them the data.
 - **Copies can be compared cheaply.** Two copies of the same repository have the same root hash, regardless of the order in which records were written.
 
 A repository can be exported as a single file, called a **CAR file**, containing every record, every tree node, and the signed commit. This is how mirrors and archives take complete, verifiable copies.
 
-Accounts can delete records from their own repositories. Deletion appears in the change stream like any other change, so anyone who was watching keeps the earlier record. This is why the proposal depends on independent mirrors.
+A repository holds only the current version of each record. Replacing or deleting a record appears in the change stream like any other change, so anyone who was watching keeps the earlier version. This is why the proposal depends on independent mirrors.
 
 ### 3.3 Repository hosts and Personal Data Servers
 
@@ -129,7 +131,7 @@ A **relay** subscribes to many repository hosts and re-publishes their change st
 
 Running a relay used to be expensive, because early relays kept the full history of every repository. A protocol revision known as Sync 1.1 allowed relays to keep only recent events. A relay for the entire Bluesky network now runs on a virtual server costing about $30 per month. A relay restricted to Livepeer's repositories costs less. Anyone may run one, and several can run at once. The proposal runs Livepeer-scoped relays from the start, and readers can still subscribe to hosts directly.
 
-**Tap** is Bluesky's verified-sync tool. It reads from a relay, verifies every commit, and provides backfill and sync filtered by account and collection. An aggregator can use it instead of building its own sync code.
+**Tap** is Bluesky's verified-sync tool. It reads from a relay, verifies every commit, and provides backfill and sync filtered by account and collection. It can also follow every repository that holds a record in a chosen *signal* collection. That is how an aggregator finds publishers it has never heard of: every Livepeer publisher writes a publication policy record. Tap is still in beta.
 
 ### 3.6 Lexicons: schemas
 
@@ -137,8 +139,8 @@ A **Lexicon** is a schema for a record type or an API method, named in reverse-d
 
 Four Lexicon rules shape the proposal:
 
-- **Published Lexicons cannot change incompatibly.** A new version may add optional fields. It may not remove required fields, rename fields, or change a field's type. Any breaking change needs a new name. This is why the proposal asks for a versioning process, through a LIP, before the first schema is published, and why the pilot uses an experimental namespace.
-- **Lexicons are found through DNS.** The authority for `network.livepeer.*` is a DNS record under `livepeer.network`, which names the account that publishes the schemas. Whoever controls that domain controls schema publication.
+- **Published Lexicons cannot change incompatibly.** Old records must stay valid under a new version, and new records under the old one. A new version may therefore add optional fields, but may not remove or rename fields, change a field's type, or change the constraints on existing fields, such as a maximum length. Any breaking change needs a new name. This is why the proposal asks for a versioning process, through a LIP, before the first schema is published, and why the pilot uses an experimental namespace.
+- **Lexicons are found through DNS.** A schema's name, minus its last part, is reversed into a domain name: `network.livepeer.orch.serviceReport` is published under `_lexicon.orch.livepeer.network`. A TXT record there names the account whose repository holds the schema. Whoever controls `livepeer.network` therefore controls schema publication.
 - **The data model forbids floating-point numbers,** because floats do not re-encode identically on every machine, which would break signatures. Ratios and latencies are therefore stored as integers in fixed units.
 - **Unknown fields are ignored.** A reader built for one version of a record can still read records written by newer software.
 
@@ -156,7 +158,7 @@ A **labeler** is an account that publishes signed **labels** about other account
 - an optional expiry;
 - the labeler's signature.
 
-A labeler can withdraw a label by publishing its negation. Consumers choose which labelers to subscribe to, and a label has no effect on anyone who does not subscribe.
+The signature is made with a dedicated `#atproto_label` key in the labeler's DID document, which may be the same as its repository key. A labeler can withdraw a label by publishing its negation. Consumers choose which labelers to subscribe to, and a label has no effect on anyone who does not subscribe.
 
 Bluesky uses labelers for moderation. The proposal uses the same mechanism for judgments, and the same principle for scores: anyone may publish them, and each application, signer and allocator chooses whose to trust.
 
@@ -214,10 +216,10 @@ One practical point needs testing early: the agent's minimal repository host mus
 
 ## 7. Limitations that matter here
 
-- **All published data is public.** AT Protocol's permissioned data, called Spaces, shipped as an alpha in August 2026. It is not production-ready and carries no security review, so the proposal assumes that anything published, anyone can read. It publishes only operator-level summaries, in the mode each publisher chooses.
+- **All published data is public.** AT Protocol's permissioned data, called Spaces, shipped as an alpha in August 2026. It is not production-ready, and it provides access control rather than encryption. The proposal therefore assumes that anything published, anyone can read. It publishes only operator-level summaries, in the mode each publisher chooses.
 - **Repositories have a size ceiling** of roughly single-digit millions of records. The proposal publishes one record per publisher per window, about 105,000 a year, far below the ceiling.
-- **Records can be deleted** by their authors. Independent mirrors keep history.
-- **Standardization is in progress.** The core protocol has been submitted to the IETF, but is not yet a formal standard.
+- **Records can be deleted** by their authors, and public network mirrors such as microcosm's Hubble delete them too. This proposal's mirrors keep them.
+- **Standardization is in progress.** The IETF chartered an Authenticated Transfer (atp) working group in March 2026 for the core repository and sync protocol. It is not yet a formal standard.
 - **Schema interoperability is voluntary.** Nothing stops a second, incompatible set of Livepeer schemas from appearing. Governance through a LIP is the remedy.
 
 ## 8. Glossary
@@ -246,7 +248,10 @@ One practical point needs testing early: the agent's minimal repository host mus
 - "AT Protocol for distributed systems engineers": <https://atproto.com/articles/atproto-for-distsys-engineers>
 - AT Protocol DID specification: <https://atproto.com/specs/did>
 - AT Protocol labels: <https://atproto.com/specs/label>
-- Introducing Tap: <https://docs.bsky.app/blog/introducing-tap>
+- Introducing Tap: <https://atproto.com/blog/introducing-tap>
+- Lexicon style guide: <https://atproto.com/guides/lexinomicon>
+- Introducing Hubble, a public mirror: <https://atproto.com/blog/introducing-hubble-a-public-mirror-for-the-whole-atmosphere>
+- Kicking off the ATP working group at the IETF: <https://atproto.com/blog/kicking-off-the-atp-working-group>
 - AT Protocol Spaces alpha: <https://atproto.com/blog/atproto-spaces-alpha>
 - Reference PDS: <https://github.com/bluesky-social/pds>
 - Kleppmann et al., "Bluesky and the AT Protocol: Usable Decentralized Social Media," arXiv:2402.03239

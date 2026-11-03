@@ -41,6 +41,9 @@
 | D29 | Labels about an orchestrator and a work key together attach to an `orch.offering` record, one per work key the orchestrator offers. | AT Protocol labels attach to a DID or a record. Approvals and capabilities concern a work key, not the whole orchestrator. |
 | D30 | Cloud SPE runs a relay scoped to Livepeer participants from Phase A0. A second operator runs another by the end of Phase A. | Every further aggregator would otherwise subscribe to every repository host. |
 | D31 | Every summary commits to a Merkle root over its already-redacted raw events. Serving raw batches is optional until Phase B. | Keeps audits possible without making every participant run an audit service from day one. |
+| D32 | From A1, an application proves which sessions it paid for with a client tag that Batteries derives from a per-key secret. Gateways publish only a hash of each tag. | Rand hash prefixes are public, so without tags anyone could copy a gateway's sessions into an observation and misreport them. |
+| D33 | Verification is per commit. A record counts if the commit it arrived in is signed by a key that a binding valid at that commit's time names. A commit's time is when an independent relay or mirror first saw it. | AT Protocol signs commits, not records. Checking the binding at the record's window would reject a repository's whole history after a key rotation. |
+| D34 | This design's mirrors keep records after their authors delete them, and the LIP says so. | Accountability is the mirrors' purpose. Network mirrors such as Hubble honor deletion, so they cannot serve it. Records hold no personal data, which makes keeping them acceptable. |
 
 ## C.2 Context the decisions rest on
 
@@ -84,7 +87,7 @@
 
 10. Are livepeer-node's histogram buckets, adopted as `latency-ms-v1`, dense enough between 250 ms and 2.5 s? If not, should the session outbox carry each single-shot call's header latency, so that a denser bound set can be built without changing the metrics?
 11. How long must participants retain raw events for audit?
-12. Is the clock policy proposed in the implementation plan ([§5.4](implementation-plan.md#54-clock-policy)) acceptable: refuse to publish beyond a two-second clock offset, and match across adjacent windows?
+12. Is the clock policy proposed in the implementation plan ([§5.4](implementation-plan.md#54-clock-policy)) acceptable: refuse to publish beyond a two-second clock offset, and match a rand hash anywhere within its session's span?
 13. Is a gateway's coarsened count of paying API keys safe to publish, or should it be dropped?
 
 ### Trust
@@ -104,7 +107,7 @@
 ### Upstream
 
 22. Will livepeer-node's maintainers accept the session outbox, signed runner records and signed challenges, and in what form?
-23. Will Batteries' maintainers accept the rand hash on usage rows, and can Batteries issue the agent a read-only Kafka credential?
+23. Will Batteries' maintainers accept the rand hash and client tag on usage rows, and can Batteries issue the agent a read-only Kafka credential?
 
 ### Workload integrity
 

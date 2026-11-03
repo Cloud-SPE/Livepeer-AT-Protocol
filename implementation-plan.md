@@ -310,7 +310,7 @@ Its outputs are:
 - **participant sets per round:** active orchestrators with their service URIs from either registry, and senders with a deposit and reserve;
 - **redemptions**, each with its revealed rand value and the rand hash it opens.
 
-It is built by extracting Batteries' TicketBroker listener (`internal/chain/listener.go`), which already handles reorganizations, into a reusable module. It reads through two RPC providers, requires them to agree on block hashes, and waits 64 confirmations before data counts as final. The Livepeer subgraph serves as an independent daily cross-check, not as a source.
+It is built by extracting Batteries' TicketBroker listener (`internal/chain/listener.go`), which already handles reorganizations, into a reusable module. It reads through two RPC providers and requires them to agree on block hashes. Data counts as final once its block is at or below Arbitrum's `finalized` block, which follows finality on Ethereum; before that it is provisional. Arbitrum produces a block every quarter-second or so, so a fixed confirmation count would say little about finality. The Livepeer subgraph serves as an independent daily cross-check, not as a source.
 
 #### 3.3.3 Relay and Tap
 
@@ -321,7 +321,9 @@ It is built by extracting Batteries' TicketBroker listener (`internal/chain/list
   - known scorer hosts.
 
   Unknown hosts may request a crawl, and are rate-limited.
-- **Tap.** Subscribes to the relay with a DID list from the identity service, filtered to the Livepeer collections and the experimental namespace. It delivers to the ingest service by acknowledged WebSocket, so delivery is at least once.
+- **Tap.** Subscribes to the relay, filtered to the Livepeer collections and the experimental namespace. It delivers to the ingest service by acknowledged WebSocket, so delivery is at least once.
+  - Every publisher writes an `operator.policy` record. Tap uses that collection as its *signal collection*, so it follows every repository that publishes under these schemas, including applications and probers, which have no binding.
+  - Tap describes itself as beta. The pilot pins its version, and the conformance tests in [§13](#13-verification-and-quality-gates) run against it.
 
 #### 3.3.4 Identity service
 
@@ -359,7 +361,7 @@ The formula code is published, and a `recompute` command reproduces any shard fr
 
 #### 3.3.8 Labeler
 
-A standard AT Protocol labeler service exposing `com.atproto.label.queryLabels` and `subscribeLabels`, with labels signed by the labeler's key. It is a minimal Go labeler on indigo; Ozone, Bluesky's moderation stack, is heavier than needed. Each label references a method document and the evidence behind it.
+A standard AT Protocol labeler service exposing `com.atproto.label.queryLabels` and `subscribeLabels`. Its DID document carries an `#atproto_label` signing key and an `#atproto_labeler` service endpoint, and every label it publishes is signed. It is a minimal Go labeler on indigo; Ozone, Bluesky's moderation stack, is heavier than needed. Each label references a method document and the evidence behind it.
 
 Cloud SPE's labeler publishes:
 - `cap-` and `nocap-` labels, and `tls-unverified`, from its probes;
@@ -371,7 +373,7 @@ Cloud SPE's labeler publishes:
 
 #### 3.3.9 Mirror and cold archive
 
-- **Mirror.** A Tap instance in full-history mode for every followed DID. It writes every commit to object storage, plus a daily full export per DID.
+- **Mirror.** A Tap instance in full-history mode for every followed DID. It writes every commit to object storage, plus a daily full export per DID. An off-the-shelf network mirror such as microcosm's Hubble will not do: it deletes records when their authors delete them, and this mirror exists to keep them.
 - **Cold archive.** Once per round it writes:
   - an export of every followed repository;
   - an index mapping each DID to its revision and the export's SHA-256;
@@ -433,13 +435,13 @@ The participant tests and identity anchors are in proposal [§4.1](README.md#41-
 
 | Event | Procedure |
 |---|---|
-| Planned repository key rotation | The agent creates key K2. The operator signs a new binding naming K2 with a higher nonce, and the agent updates the DID document. Records signed by K1 stay valid for windows before the new binding's `validFrom`. |
-| Repository key compromised | The operator signs a binding for K2 with `validFrom` set to the time of compromise. Aggregators distrust K1 commits after that time, and labelers flag disputed windows. |
+| Planned repository key rotation | The agent creates key K2. The operator signs a new binding naming K2 with a higher nonce, and the agent updates the DID document. Commits made under K1 before the new binding's `validFrom` stay valid. The agent's next commit covers every record under K2, so a reader that fetches the whole repository verifies all of it against the new binding. |
+| Repository key compromised | The operator signs a binding for K2 with `validFrom` set to the time of compromise. Aggregators distrust K1 commits that a relay or mirror first saw after that time, and labelers flag disputed windows. |
 | Operating address compromised | A new binding omits the address. Records citing that address after the new `validFrom` lose attribution. |
 | Registered key compromised | Out of scope for telemetry. It is a stake-level incident, and aggregators follow the chain. |
 | Application's repository key compromised | The application rotates through its PLC rotation key. It has no binding, so readers rely on the PLC history. |
 | PLC directory unavailable | Cached DID documents keep working. Bindings do not depend on PLC. |
-| PLC directory misbehaves | Repository keys that no Ethereum signature binds fail verification, so the damage is limited to availability. Applications, which have no binding, are exposed to PLC misbehavior; they can choose `did:web` to avoid it. |
+| PLC directory misbehaves | Every `did:plc` change is an operation signed by a rotation key, so the directory cannot forge one. It can withhold changes or show readers different histories. Orchestrators and gateways are protected by their bindings. For applications, scorers and labelers, which have none, readers verify the signed operation history and alert on any key change. They can also choose `did:web`. |
 
 ---
 
@@ -452,7 +454,7 @@ The schemas are in [Appendix A](appendix-a-record-schemas.md). This section cove
 | Stage | NSID authority | Who publishes the schemas |
 |---|---|---|
 | Pilot (A0 and A1) | An experimental authority on a domain Cloud SPE controls | Cloud SPE |
-| After the LIP | `network.livepeer.*` | The controller of the `livepeer.network` domain, through `_lexicon` DNS records and schema records |
+| After the LIP | `network.livepeer.*` | The controller of the `livepeer.network` domain, through one `_lexicon` TXT record per schema group, such as `_lexicon.orch.livepeer.network`, and schema records in the publishing account's repository |
 
 The LIP fixes four things:
 - the versioning rules: only optional fields may be added, and breaking changes need new names;
@@ -475,7 +477,7 @@ Version 1 adopts livepeer-node's buckets ([Appendix A §A.2](appendix-a-record-s
 ### 5.4 Clock policy
 
 - Windows use the publisher's UTC clock. The agent refuses to publish when its NTP-reported offset exceeds 2 seconds.
-- Cross-party matching uses rand hashes, not time. The aggregator matches rows whose windows lie within one window of each other, which absorbs clock skew and grace-period edges.
+- Cross-party matching uses rand hashes, not time. Each source places events by when it recorded them ([Appendix A §A.2](appendix-a-record-schemas.md#a2-conventions)), so one session can sit in different windows on each side. The aggregator matches a rand hash anywhere within the session's span, plus one window either side for clock skew.
 
 ---
 
@@ -489,7 +491,7 @@ The engine works on **pair-windows**: one payer address, one orchestrator addres
 
 | # | Signal | Computation | Phase | Strength |
 |---|---|---|---|---|
-| S1 | Three-way match | Intersect rand hash prefixes across a gateway's digest row, an orchestrator's payer row and an application's observation row. Compare sessions, value and outcomes within tolerance. | A1 | Strong when the parties are independent |
+| S1 | Three-way match | Intersect rand hash prefixes across a gateway's digest row, an orchestrator's payer row and an application's observation row. An application's sessions count only where its client tags hash to the gateway's values. Compare sessions, value and outcomes within tolerance. | A1 | Strong when the parties are independent |
 | S2 | Redemption anchor | For each redemption, hash the revealed rand value, find the published rows holding its prefix, and mark the pair-window *anchored* | A0 for gateway digests; A1 for the others | Exact proof that the business happened, in the window both sides named |
 | S3 | Volume consistency | Compare expected wins, from the published tickets and expected value, with observed redemptions, using a Poisson interval over a rolling seven-round window | A0 | Statistical. Weak for small pairs, strong for whole-gateway totals. |
 | S4 | Application and gateway totals | Compare an application's paid attempts with its gateway's sessions per orchestrator and window, when the application names the gateway | A0 | Medium. Becomes S1 when rand hashes arrive. |
@@ -617,6 +619,7 @@ These are proposed numbers for the LIP discussion, not facts.
 | Orchestrator, gateway and node addresses | Public by design | — |
 | Runner IDs, runner app names and versions | Already public in discovery | — |
 | Rand hash prefixes | Published. They reveal the number and timing of sessions between a gateway and an orchestrator, not who the application is. | — |
+| Client tags | Published by the application only. The gateway publishes hashes that cannot be linked across sessions. | Batteries and agent |
 
 **Schema-level enforcement.** The Lexicons contain no fields that can hold private data. The agent validates every outbound record against its Lexicon, and against a second "no free text" rule: strings must be known values, addresses, hashes, timestamps or identifiers that discovery already publishes. A configuration mistake cannot smuggle private data into a free-form field.
 
@@ -963,33 +966,49 @@ A single treasury proposal for the aggregator's hosting and the cold archive is 
 
 ## 13. Verification and quality gates
 
+Every component is built test-first. The lists below give the behaviors each one must show, in the order we would drive them. The first item in each list is its starter test.
+
+Two rules apply throughout:
+- **Expected values come from the inputs, worked out by hand.** Small fixtures make that possible. A golden file copied from a component's own output proves only that the component is consistent with itself.
+- **Invariants get property-based tests,** run over many random inputs, in addition to the examples.
+
 ### 13.1 Agent
 
-- **Unit tests:**
-  - window alignment, grace periods and late events;
-  - counter deltas across restarts;
-  - histogram merge additivity, property-based: merging then summarizing equals summarizing then merging;
-  - allowlist redaction, with a fuzz test proving that no unlisted field reaches the store;
-  - record-size paging;
-  - prefix sorting, truncation and Bloom filters.
-- **Golden tests.** Fixtures produce known records byte for byte:
-  - livepeer-node metrics scrapes and discovery responses;
-  - signer events from Batteries' test fixtures;
-  - Builder Core event pages.
-- **Repository conformance.** A nightly CI job runs an indigo relay and Tap against the agent's repository host. It checks backfill, live sync, a resync after a gap, and key rotation.
-- **Soak test.** Seven days at ten times a busy gateway's event rate, under 100 MB of RAM.
-- **Attested discovery view.** Its output must parse in Builder Core's discovery client, the signer and the SDK, and each safety rail must trigger in tests.
+1. **Starter test:** an empty window produces a valid record with a policy stamp, no rows and a commitment to an empty batch.
+2. **Window placement:** an event recorded at 14:04:59.999 falls in the 14:00 window, and one at 14:05:00 in the 14:05 window. A call is placed by its completion time, a session by its end.
+3. **Counter deltas:** deltas across consecutive windows add up to the counter's total increase. The scrape that closes one window opens the next. A restart produces a reset count and no negative values.
+4. **Additivity**, property-based: merging two rows and then reading the totals gives the same result as summarizing the combined events.
+5. **Republish:** rebuilding a window from the local store after a crash produces the same record, under the same key.
+6. **Payment references:** prefixes are sorted and cut to the lowest 2,000. The Bloom filter contains every prefix, and client tags stay aligned with their prefixes.
+7. **Redaction**, fuzzed: a field the allowlist does not name, added to any source event, never reaches the store or a record.
+8. **No free text**, fuzzed: arbitrary strings injected into identifier fields are rejected, not published.
+9. **Paging:** a record that would exceed 800 KB is split into pages whose rows add up to the unsplit record.
+10. **Schema compatibility:** every record validates against the current schema and against the previous published version.
+11. **Attested discovery view:** its output parses in Builder Core's discovery client, the signer and the SDK. Each safety rail has its own test: stale scores fail open, the candidate floor holds, the exploration share stays within bounds under a seeded random source, and the rate-of-change cap holds.
+
+Three further suites run outside the inner loop:
+- **Contract tests.** Each input adapter is tested against the real upstream at a pinned version: livepeer-node's metrics and discovery, the signer's events through Batteries' broker, and Builder Core's events feed. The same tests run against the fakes used in unit tests, so a fake that drifts from the real system fails.
+- **Repository conformance.** Nightly, an indigo relay and Tap sync from the agent's repository host. The suite checks backfill, live sync, a resync after a gap, and key rotation.
+- **Soak.** Seven days at ten times a busy gateway's event rate, under 100 MB of RAM.
 
 ### 13.2 Aggregator
 
-- NaaP's validation suite, extended with record-path cases.
-- The replay determinism harness, extended so that the same records produce identical checksums per layer.
-- **Identity tests:** bindings at window boundaries, rotation, operating-address mapping, URL-to-address mapping across both registries. Unresolved addresses are never merged.
-- **Corroboration tests:** synthetic worlds with known truth, injected misreporting and injected self-dealing. The engine must detect them at the published thresholds.
+1. **Starter test:** one valid binding and one record produce one accepted row, attributed to the binding's address.
+2. **Binding verification:** a record is accepted when its commit's key is named by a binding valid at the commit's time. It is rejected when the binding names another key, or once a binding with a higher nonce for the same address appears in any repository.
+3. **Rotation:** after a key rotation, a full-repository backfill still verifies every historical record.
+4. **Compromise:** commits under a compromised key that were first seen after the compromise are rejected; earlier ones stay accepted.
+5. **Address mapping:** node accounts and both service registries resolve to one registered address. An address with no binding stays unresolved and is never merged.
+6. **Matching:** one session's rand hash matches across a gateway's several windows and the orchestrator's single window. A prefix copied from a public digest, without a valid client tag, is not counted for the copier.
+7. **Redemption anchoring:** a redemption's revealed secret anchors exactly the rows that hold its prefix.
+8. **Amendments:** a record changed after it became final is flagged as an amendment, and scorers use the version current at their freeze time.
+9. **Determinism:** replaying the same record log produces identical checksums at every layer, using NaaP's replay harness.
+10. **Corroboration under attack:** synthetic worlds with known truth, injected misreporting and injected self-dealing are detected at the published thresholds.
 
 ### 13.3 Phase A parity
 
-The proposal's [§7.3](README.md#73-proving-the-new-pipeline-counts-correctly) table, computed per hour and orchestrator for every pilot participant. It compares published records with:
+Parity is the outer acceptance test for the whole pipeline. The inner tests show that each part behaves as specified; parity shows that the parts together count what the participants' own records count.
+
+The proposal's [§7.3](README.md#73-proving-the-new-pipeline-counts-correctly) table is computed per hour and orchestrator for every pilot participant. It compares published records with:
 - Batteries' ledger, for payments;
 - Builder Core's attempts and cost classes, for outcomes;
 - livepeer-node's metrics, for orchestrator quality;
@@ -999,9 +1018,10 @@ Payment rows must match exactly. Quality rows have the tolerances the proposal g
 
 ### 13.4 Scorer
 
-- A daily recompute of a random 5% of shards from public mirrors.
-- Formula changes ship as new formula versions, never in place.
-- A shadow-evaluation report, generated and published weekly.
+1. **Starter test:** one orchestrator with hand-built inputs produces the score worked out by hand from the formula.
+2. **Recompute:** a daily recompute of a random 5% of shards, from public mirrors, reproduces them byte for byte.
+3. **Versioning:** a formula change ships as a new formula version, never in place.
+4. **Reporting:** a shadow-evaluation report is generated and published weekly.
 
 ---
 
@@ -1014,7 +1034,7 @@ Payment rows must match exactly. Quality rows have the tolerances the proposal g
 | K3 | Few orchestrators publish | Medium | Medium | Application and probe records score orchestrators without them; bounties; per-payer accounting as the operator's own benefit |
 | K4 | Builder Core's events feed slips | Low | High | The plan assumes M1 to M5; as a fallback, the agent reads the application's attempt and cost tables read-only |
 | K5 | The minimal repository host is harder than expected | Medium | Medium | Fall back to the community PDS; the agent's PDS client mode ships first |
-| K6 | AT Protocol changes: sync, Lexicon resolution, PLC governance | Medium | Medium | Pinned indigo versions; conformance CI; Ethereum-rooted trust makes PLC replaceable |
+| K6 | AT Protocol changes: sync, Lexicon resolution, PLC governance; Tap is still in beta | Medium | Medium | Pinned indigo and Tap versions; conformance CI; Ethereum-rooted trust makes PLC replaceable |
 | K7 | Scores are gamed | Medium | High | Redemption anchoring, weighting, labels, quorum, rate-of-change caps, the exploration share |
 | K8 | Scores harm selection | Low–medium | High | The shadow phase, counterfactual replay, fail-open, the candidate floor |
 | K9 | Traffic concentrates because many applications follow the same labels | Medium | Medium | The exploration share and the candidate floor; the concentration criterion in §7.6; labeler diversity |

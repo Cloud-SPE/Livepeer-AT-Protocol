@@ -296,13 +296,15 @@ Each publishing role installs the same artifact: one Go binary with one configur
 
 The agent is a separate component on purpose. It adds nothing to the request path of any job. It reads Builder Core, which is written in Python, over HTTP, so neither needs the other's language. An application or orchestrator that stops the agent loses publication and nothing else.
 
+The agent is also the only component that knows each source's own data model. Metric names, event fields and Builder Core's job format stay inside its input adapters, and everything downstream sees only the published schemas. When livepeer-node renames a metric, only an adapter changes. Each record names the source version it was built from.
+
 ### 2.5 The attested discovery view
 
 Consumers need scores and labels at selection time. They should not need an AT Protocol client in their request path to get them.
 
 The attested discovery view is a mode of the telemetry agent that each consumer runs next to its own engine. It works in four steps:
 1. It reads runner inventory from discovery services or orchestrators.
-2. It reads the scores and labels its operator trusts, and verifies their signatures and bindings.
+2. It reads the scores and labels its operator trusts, and verifies their signatures and the identities behind them ([§3.3](#33-where-at-protocol-falls-short)).
 3. It drops runners that fail its operator's policy.
 4. It serves the result in livepeer-node's `/discovery` format.
 
@@ -330,6 +332,21 @@ The view fails open. If no trusted score is fresh, it serves the inventory unfil
 7. [Auditing a summary](appendix-d-sequence-diagrams.md#d7-auditing-a-summary): checking a summary against its raw events.
 8. [A leaked canary](appendix-d-sequence-diagrams.md#d8-a-leaked-canary): from a probe's committed test secret to an orchestrator's exclusion.
 
+### 2.7 Terms
+
+Several words mean different things in different parts of the Livepeer stack. This proposal uses them as follows.
+
+| Term | Meaning in this proposal | Not to be confused with |
+|---|---|---|
+| Gateway | The protocol role that pays orchestrators: a remote signer together with the Ethereum address that holds its ticket deposit and reserve | The Python gateway SDK, which applications use to call runners; inference-gateway, which is an application |
+| Application | Software built on Builder Core that calls runners for its own users | A runner app |
+| Runner app | The workload a Live Runner serves, such as `blueclaw/chat/qwen3.8-27b` | An application |
+| Work key | A runner app, with its model and version | — |
+| Payment session | The payments made under one payment challenge, identified by one rand hash. livepeer-node calls the identifier `pm_session_id`. | A Batteries payment session, Batteries' record of a client's signing session, which can cover several rand hashes; a persistent runner session, which can span several payment sessions |
+| Rand hash | The hash of the orchestrator's secret for one payment challenge, carried in every ticket of the payment session | — |
+| Window | The period one summary record covers: five minutes, or one round | — |
+| Binding | A record, signed by an on-chain address, that names a DID and its repository's signing key | — |
+
 ---
 
 ## 3. Why AT Protocol, and what it does not do
@@ -346,7 +363,7 @@ AT Protocol was built for social media, but its core is a general mechanism for 
 - **The sync protocol.**
   - Every repository host exposes a stream of changes, with cursors for resuming, and full exports for catching up. Any consumer can subscribe without permission.
   - A *relay* combines many such streams into one. A relay that keeps only recent data costs about $30 per month to run.
-  - Tap, Bluesky's verified-sync tool, provides backfill and filtered sync off the shelf.
+  - Tap, Bluesky's verified-sync tool, provides backfill and filtered sync off the shelf. It is still in beta.
 - **Lexicons.** A Lexicon is a schema for a record type, named in reverse-domain form. We would define a `network.livepeer.*` family of schemas. Once published, a Lexicon cannot change incompatibly; a breaking change requires a new name.
 
 AT Protocol also defines *labelers*: accounts that publish signed judgments about other accounts or records, which consumers choose to subscribe to. Our labelers use that mechanism directly, and our scorers follow the same model.
@@ -365,10 +382,12 @@ Using AT Protocol is a choice of tooling, not a claim that the problem requires 
 
 Four limitations shape the design.
 
-- **Its default identity directory is centralized.** `did:plc` depends on a directory operated by Bluesky. The Ethereum binding limits that dependency to availability. A misbehaving directory could misdirect readers, but readers would reject records signed by keys the binding does not name.
+- **Its default identity directory is centralized.** `did:plc` depends on a single directory, operated by Bluesky and moving to an independent Swiss association. Every change to a `did:plc` identity is an operation signed by one of the account's rotation keys, so the directory cannot forge a key change. It can withhold changes, or show different readers different histories.
+  - For orchestrators and gateways, the Ethereum binding contains this: readers reject records signed by keys the binding does not name.
+  - Applications, probers, scorers and labelers have no binding. A reader that trusts one of them should verify its signed operation history, not only its current DID document, and alert on any key change.
 - **Repositories have a size ceiling.** They are designed for up to single-digit millions of records, so participants publish one summary record per window, not individual events ([§5.3](#53-summaries-not-events)).
 - **Records can be deleted.** A participant can remove a record from its own repository. Accountability therefore depends on independent archives ([§9](#9-keeping-history)).
-- **Published data is public.** Permissioned data ("Spaces") shipped as an alpha in August 2026. It is not production-ready, so this design assumes that anything published, anyone can read.
+- **Published data is public.** Permissioned data ("Spaces") shipped as an alpha in August 2026. It is not production-ready, so this design assumes that anything published, anyone can read. Spaces also provides access control rather than encryption: anyone admitted to a space can read it. Once it is stable, it could let an application share observations with chosen scorers only, or let auditors read raw batches. Neither is part of this design until then.
 
 ---
 
@@ -397,12 +416,14 @@ The **binding record** is an EIP-712 message signed by the participant's on-chai
 - any operating addresses;
 - the role;
 - a validity window of at most a year;
-- a nonce that increases with each new binding.
+- a nonce that increases with each new binding, so the newest binding for an address wins even if older ones remain in other repositories.
 
-An aggregator accepts a record only if all three of these hold:
-1. The record's commit is signed by a key that a valid binding names.
-2. That binding was valid at the time of the record's window.
-3. The binding's address was a participant in that round.
+AT Protocol signs commits, not individual records. A reader receives each record inside some commit: the commit that wrote it, if the reader follows the change stream, or the repository's latest commit, if it fetches the whole repository. An aggregator therefore verifies each commit, then each record in it. It accepts a record only if all three of these hold:
+1. The commit is signed by a key that a binding names.
+2. That binding was valid when the commit was made.
+3. The binding's address was a participant in the round of the record's window.
+
+The second check keeps history verifiable after a key rotation. The first commit under a new key covers every record in the repository, and the binding for the new key covers that commit. A commit's time is taken from when an independent relay or mirror first saw it, because the commit's own timestamp is chosen by its signer.
 
 No transaction and no governance action is required.
 
@@ -484,10 +505,10 @@ Two things are still missing: the payer of each session, and the session itself.
 
 Repositories cannot hold every event, and they should not: raw events contain session identifiers and timing detail that serve no public purpose. Participants publish **summaries** instead: counts, sums and histograms.
 
-- **One record per publisher per window.** Each record carries an array of rows, grouped by orchestrator, runner app and model. Its key is derived from the window, so a republish replaces the record rather than duplicating it. That is 288 records per day for a five-minute window.
-- **Windows.** Five minutes by default. A participant that publishes in the `coarse` or `delayed` mode may use one window per round instead.
+- **One record per publisher per window.** Each record carries an array of rows, grouped by orchestrator, runner app and model. Its key is derived from the window, so a republish replaces the record rather than duplicating it. That is 288 records per day for a five-minute window. A repository keeps only the latest version of each record. The change stream carries every version, so mirrors keep them all. Once a window's record is final, a further change is an amendment that every reader can see.
+- **Windows.** Five minutes by default. A participant that publishes in the `coarse` or `delayed` mode may use one window per round instead. Each source places an event in the window in which it recorded it: a call when it completed, a ticket when it was signed, a session when it ended.
 - **Additive quantities only.** An aggregator can merge twelve five-minute rows into an hour, or combine rows from many publishers, without error. NaaP's canonical rules already require this; they forbid averaging averages.
-- **Payment references.** Rows that describe paid sessions carry the first eight bytes of each session's rand hash ([§6.1](#61-three-sided-reports)). The list is capped per row, with a Bloom filter for any overflow.
+- **Payment references.** Rows that describe paid sessions carry the first eight bytes of each session's rand hash ([§6.1](#61-three-sided-reports)). The list is capped per row, with a Bloom filter for any overflow. From A1, application rows also carry each session's client tag, and gateway rows a hash of it.
 - **Commitments.** Each record carries a Merkle root over the redacted raw events it summarizes. The raw events stay with the publisher for a published retention period. An auditor who doubts a summary can request the raw batch and check it against the root.
 
 ### 5.4 One job family, many runner apps
@@ -536,6 +557,13 @@ The rand hash makes a good join key for four reasons:
 - **It is safe to publish.** A hash does not reveal the secret behind it, so publishing it lets no one predict or claim a win.
 
 What a published list does reveal is how many payment sessions a gateway opened with an orchestrator, and when. On-chain redemptions already show which gateway pays which orchestrator, and roughly how much. The list adds precision and timing, not new relationships. An application behind a shared gateway is never revealed by the gateway's digest. It appears only if it publishes its own observations.
+
+**Proving which application made a session.** A rand hash proves that a session happened. It does not prove which application made it. The prefixes in a gateway's digest are public, so anyone could copy them into an observation and claim that those sessions went badly. We therefore propose a client tag for each session:
+- Batteries holds a secret for each API key. For each session that key pays for, it derives a tag from the secret and the rand hash, and returns the tag to the key's holder on its usage rows.
+- The application publishes the tag beside the session's prefix.
+- The gateway's digest publishes only a hash of each tag.
+
+An aggregator checks that each tag an application publishes hashes to the gateway's value. Nobody without the key's secret can compute a tag, so an application can claim only sessions it paid for. The gateway's operator could compute tags for its own clients, but it already handles their payments. Tags from different sessions cannot be linked to each other, so the published hashes reveal nothing about who the clients are.
 
 ### 6.2 Signed offers
 
@@ -732,6 +760,8 @@ Preserved history matters for two reasons. Scores need past data, and disputes n
 
 Mirrors need not be trusted. Every repository change is signed, so a copy held by anyone can be verified against the participant's key. Several independent mirrors mean no single party holds the history.
 
+These mirrors depart from a norm of the wider AT Protocol network. Hubble, the network-wide public mirror run by microcosm, deletes records when their authors do. A mirror for this design must keep them, because accountability is its purpose. The LIP should state plainly that records published under these schemas are kept after deletion. The rule that records hold no personal data is what makes that acceptable.
+
 Retention differs by kind of data. Summaries and Merkle roots are kept indefinitely. Raw events stay with participants for a period the specification must fix, and audits must happen within it.
 
 Size is not urgent. One record per publisher per five-minute window is about 105,000 records a year, far below the repository ceiling. Participants may still compact old windows into hourly and daily records for tidiness, and may prune the detail once mirrors hold it. Pruning is safe only because the mirrors exist.
@@ -796,7 +826,7 @@ Stable runner identity would help pool management even without this proposal. li
 
 **Schemas.** The `network.livepeer.*` Lexicons, their versioning rules and the non-goals in [§12](#12-what-this-proposal-does-not-do) should be adopted through a LIP. Because a published Lexicon cannot change incompatibly, the versioning process must exist before the first schema is published. Two consequences follow:
 - The pilot publishes under an experimental namespace and migrates at adoption.
-- Lexicon resolution runs through DNS, so the LIP must name whoever controls the `livepeer.network` domain.
+- Lexicon resolution runs through DNS. Each group of schemas resolves through its own TXT record: `network.livepeer.orch.*` through `_lexicon.orch.livepeer.network`, for example. The LIP must therefore name whoever controls the `livepeer.network` domain.
 
 **Pilot scope.** Live Runner work on livepeer-node, by applications built on Builder Core. The pilot assumes that Builder Core's milestones M1 to M5 are complete, including its events feed.
 

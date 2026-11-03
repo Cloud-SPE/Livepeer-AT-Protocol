@@ -178,6 +178,7 @@ sequenceDiagram
   Rel-->>Agg: orch.serviceReport from orchestrator O
   Agg->>Agg: verify signatures and bindings, and resolve node accounts to registered addresses
   Agg->>Agg: match rand hash prefixes across the three records
+  Agg->>Agg: check that A's client tags hash to G's published values (A1)
   alt the records agree on sessions and value
     Agg->>Agg: mark the sessions corroborated
   else a prefix appears on one side only

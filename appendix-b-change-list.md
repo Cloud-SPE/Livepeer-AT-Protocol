@@ -24,7 +24,7 @@ Changes marked **standalone** are useful even if the rest of the proposal is nev
 | livepeer-node orchestrator | Metrics per runner app and runner: calls by outcome, header latency, bytes, reservations, session ends by cause, payment counters | A session outbox; signed runner records; signed payment challenges | A1 |
 | livepeer-node remote signer | One `create_signed_ticket` event per signing, with the rand hash as `pm_session_id` | Runner ID, face value and win probability in each event; verification of signed challenges | A1 |
 | livepeer-node discovery service | Merged runner inventory, keeping complete runner records | Nothing | — |
-| Clearinghouse Batteries | The signer's event log, a ledger, settlement matching by rand hash | The rand hash on usage rows | A1 |
+| Clearinghouse Batteries | The signer's event log, a ledger, settlement matching by rand hash | The rand hash and a client tag on usage rows | A1 |
 | Builder Core | Attempts with outcomes, failover, cost classes, an events feed once M3 to M5 are complete | First-byte time on attempts; the rand hash on attempt sessions; a selection policy plugin | A0, A1 |
 | Python SDK | Tries runners in the order discovery returns them | Verification of signed runner records and challenges | A1 |
 | Telemetry agent | — | New ([§B.8](#b8-the-telemetry-agent)) | A0 |
@@ -151,6 +151,8 @@ No change. Signed runner records pass through, because discovery keeps complete 
 
 **Change.** Store each event's `pm_session_id` in a new `usage_events` column, and return it on usage rows. Any client can then reconcile its usage with on-chain settlements session by session, and Builder Core can attach the rand hash to its attempts.
 
+Return a **client tag** with it: the first 16 bytes of HMAC-SHA256 over the rand hash, keyed by a secret Batteries holds for each API key. Give the gateway's agent only the first 8 bytes of each tag's SHA-256 hash, never the tag. Together they let an application prove which sessions it paid for without revealing itself to anyone else ([proposal §6.1](README.md#61-three-sided-reports)).
+
 ### B.5.2 The agent reads the signer's event log — A0
 
 Batteries runs the Kafka broker that the signer publishes to: an embedded `minikafka` (`internal/kafka/listener.go`, `OpenBroker`). The gateway's agent reads the same topic with its own offsets, as Batteries itself does.
@@ -179,10 +181,10 @@ The runner ID is parsed from `runner_url`, which needs no change.
 
 ### B.6.3 Rand hash on attempt sessions — A1
 
-Once Batteries returns `pm_session_id` on usage rows (B.5.1):
-1. Copy it into `lpb_usage_rows`.
+Once Batteries returns `pm_session_id` and the client tag on usage rows (B.5.1):
+1. Copy both into `lpb_usage_rows`.
 2. Carry it on each matched entry of an attempt's `sessions`, using the matched `payment_session_id`.
-3. Include it in `job.finished` and cost events.
+3. Include both in `job.finished` and cost events.
 
 ### B.6.4 Selection policy plugin — Phase A in shadow, then B and C
 
@@ -289,7 +291,7 @@ livepeer-node's maintainers added the operational metrics this design builds on 
 1. **Open an issue first.** Describe the operator's benefit from each change, before the proposal's.
 2. **Propose in order of size.** Each change below is useful on its own.
    1. Signer event fields (B.3.2).
-   2. The rand hash on Batteries usage rows (B.5.1).
+   2. The rand hash and client tag on Batteries usage rows (B.5.1).
    3. The session outbox (B.2.2).
    4. Signed runner records (B.2.3).
    5. Signed challenges, and their verification by the signer and the SDK (B.2.4, B.3.3, B.7).

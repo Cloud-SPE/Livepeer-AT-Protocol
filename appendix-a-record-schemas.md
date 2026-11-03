@@ -40,22 +40,25 @@
 7. **Summaries are additive.** Every numeric field is a count, a sum, or a histogram of counts. An aggregator can merge windows and publishers without error, and consumers compute rates from counts.
 8. **One record per publisher per window.**
    - Each record carries an array of rows. The record key is derived from the window: `<windowStart>.<durationSec>`, such as `20261104T1405Z.300`, or `round-<n>` for a round window.
-   - When late events arrive, the agent republishes under the same key, replacing the record. The repository's history still shows that it changed.
+   - When late events arrive, the agent republishes under the same key, replacing the record. The repository keeps only the latest version, but the change stream carries every version, so mirrors keep them all.
+   - A record is final 24 hours after its window ends, or once its delay has passed in `delayed` mode. A later change is an amendment: allowed, visible to every reader, and counted as such by scorers.
    - A record must stay under 1 MB. One that would exceed 800 KB is split into pages, with keys ending `.p2`, `.p3` and so on.
-9. **Every summary carries a policy stamp**: the publication mode it was produced under and when it was published ([§A.6](#a6-networklivepeeroperatorpolicy)).
-10. **Every summary carries a commitment** to the redacted raw events it was computed from. The events stay with the publisher.
+9. **Events are placed by the time they were recorded.** A call or attempt belongs to the window in which it completed, a ticket to the window in which it was signed, and a session to the window in which it ended. A long session therefore appears in several of a gateway's windows but in only one of the orchestrator's. Aggregators match rand hashes across a session's whole span, not window by window.
+10. **Every summary carries a policy stamp**: the publication mode it was produced under and when it was published ([§A.6](#a6-networklivepeeroperatorpolicy)).
+11. **Every summary carries a commitment** to the redacted raw events it was computed from. The events stay with the publisher.
 
 ### Payment references
 
-11. **Rows that describe paid sessions carry rand hash prefixes.**
+12. **Rows that describe paid sessions carry rand hash prefixes.**
     - The recipient rand hash is the 32-byte value in the ticket parameters of each payment challenge. livepeer-node draws a new one for every challenge, so it identifies one payment session.
     - A prefix is its first 8 bytes. A row lists its prefixes in ascending order, concatenated into one `bytes` field, up to 2,000 of them.
-    - A row with more sessions lists the lowest 2,000 and puts every prefix into a Bloom filter. Because hashes are uniformly distributed, the listed prefixes are a random sample of the row's sessions.
+    - A row with more sessions lists the lowest 2,000 and puts every prefix into a Bloom filter. Choosing the lowest keeps the list deterministic. It is not a guaranteed random sample, because orchestrators choose the secrets behind the hashes.
+    - From A1, rows also carry a client tag, or its hash, for each listed session ([proposal §6.1](README.md#61-three-sided-reports)). Applications and probers publish the 16-byte tags; gateways publish the first 8 bytes of each tag's SHA-256 hash. An application can therefore claim only sessions it paid for.
     - Collisions are negligible. At a hundred million sessions a year, the chance of any two 8-byte prefixes colliding is about 0.03%, and matching is already narrowed to one gateway, one orchestrator and adjacent windows.
 
 ### Histograms
 
-12. **Histograms name a bound set** instead of carrying their own edges. Bound sets are fixed per schema version, so histograms from different publishers can be summed.
+13. **Histograms name a bound set** instead of carrying their own edges. Bound sets are fixed per schema version, so histograms from different publishers can be summed.
 
 | Bound set | Unit | Upper edges | Chosen to match |
 |---|---|---|---|
@@ -66,7 +69,9 @@
 
 ### Namespace
 
-13. **Names.** The schemas are written under their intended `network.livepeer` names. The pilot publishes them under an experimental authority controlled by Cloud SPE, and migrates when the LIP is adopted. A published Lexicon cannot change incompatibly, so only optional fields may be added later; a breaking change needs a new name.
+14. **Names.** The schemas are written under their intended `network.livepeer` names. The pilot publishes them under an experimental authority controlled by Cloud SPE, and migrates when the LIP is adopted. A published Lexicon cannot change incompatibly, so only optional fields may be added later; a breaking change needs a new name.
+    - Constraints such as maximum lengths are fixed for the life of a name too, so the limits below are set with headroom.
+    - Closed `enum` lists are avoided for the same reason. Open `knownValues` lists can grow.
 
 The Lexicon JSON below is abbreviated where fields repeat a shared definition. Descriptions carry the intended semantics.
 
@@ -120,7 +125,7 @@ The Lexicon JSON below is abbreviated where fields repeat a shared definition. D
       "properties": {
         "start": { "type": "string", "format": "datetime", "description": "Time windows start on a multiple of durationSec." },
         "end": { "type": "string", "format": "datetime" },
-        "durationSec": { "type": "integer", "enum": [300, 3600, 86400] },
+        "durationSec": { "type": "integer", "minimum": 60, "description": "300, 3600 or 86400 in this version." },
         "round": { "type": "integer", "minimum": 0, "description": "The Livepeer round in which the window started. Required for round windows." }
       }
     },
@@ -190,6 +195,8 @@ The Lexicon JSON below is abbreviated where fields repeat a shared definition. D
       "properties": {
         "sessions": { "type": "integer", "minimum": 0, "description": "Distinct rand hashes in the row." },
         "randHashPrefixes": { "type": "bytes", "maxLength": 16000, "description": "The first 8 bytes of each session's recipient rand hash, ascending and concatenated. At most 2,000; when there are more, the lowest 2,000." },
+        "clientTags": { "type": "bytes", "maxLength": 32000, "description": "A1, application and probe rows: the 16-byte client tag of each listed session, in the same order as randHashPrefixes." },
+        "clientTagHashes": { "type": "bytes", "maxLength": 16000, "description": "A1, gateway rows: the first 8 bytes of SHA-256 of each listed session's client tag, in the same order as randHashPrefixes." },
         "overflow": { "type": "ref", "ref": "#bloom", "description": "Present when sessions exceeds 2,000. Contains every prefix in the row." }
       }
     },
@@ -234,7 +241,7 @@ A binding proves that a repository belongs to an on-chain participant. Orchestra
           "role": { "type": "string", "knownValues": ["orchestrator", "gateway"] },
           "validFrom": { "type": "string", "format": "datetime" },
           "validUntil": { "type": "string", "format": "datetime", "description": "At most one year after validFrom." },
-          "nonce": { "type": "integer", "minimum": 0, "description": "Strictly increasing per registered address. Among valid bindings, the highest nonce wins." },
+          "nonce": { "type": "integer", "minimum": 0, "description": "Strictly increasing per registered address. Among valid bindings for an address, in any repository, the highest nonce wins." },
           "sig": { "type": "string", "maxLength": 132, "description": "EIP-712 signature by registeredAddress over the Binding message." }
         }
       }
@@ -260,15 +267,17 @@ Binding {
 }
 ```
 
-**Verification.** An aggregator accepts a record only if all of these hold:
-1. The commit containing the record verifies with repository key *K*.
-2. A binding valid at the record's window names this DID, and its `repoKeyHash` equals keccak256(*K*).
-3. The binding's signature recovers to `registeredAddress`.
-4. The address was a participant in the window's round:
+**Verification.** AT Protocol signs commits, not records, so verification starts from the commit in which a reader received the record. An aggregator accepts a record only if all of these hold:
+1. The commit verifies with repository key *K*, taken from the DID document.
+2. A binding that was valid when the commit was made names this DID, and its `repoKeyHash` equals keccak256(*K*). A commit's time is when an independent relay or mirror first saw it, or its revision if none did.
+3. The binding's signature recovers to `registeredAddress`, and no binding for that address with a higher nonce exists in any repository.
+4. The address was a participant in the round of the record's window:
    - an orchestrator active in BondingManager, with a service URI in either service registry;
    - a gateway with a deposit and reserve in TicketBroker.
 
 **Who signs.** On livepeer-node, the orchestrator's registered key can stay offline and sign once a year, with a hardware wallet if the operator prefers. A gateway's sender key is always online, because the signer uses it for every ticket.
+
+**Why the Ethereum key is not the repository key.** AT Protocol accepts secp256k1 repository keys, the curve Ethereum uses, so a gateway could in principle sign commits with its sender key. We keep the two separate. AT Protocol signs SHA-256 digests, while Ethereum wallets sign Keccak-256 digests and typed messages, so a hardware wallet could not sign commits. An orchestrator's registered key would also have to stay online.
 
 ## A.6 `network.livepeer.operator.policy`
 
@@ -601,7 +610,7 @@ One record per orchestrator operator per window. It has two kinds of row:
 | `metered` | `payment_tickets_total{kind}`, `payment_credit_eth_total`, `payment_charge_eth_total`, `payment_billed_seconds_total`, `payment_fixed_charges_total` | A0 |
 | `payerRows` | The session outbox: one durable record per payment session | A1 |
 
-The agent computes each window's counts as counter increases, handling resets the way Prometheus does, and counts the resets it sees in `counterResets`. Histograms are summed across protocols, because rows are not split by protocol.
+The agent computes each window's counts as counter increases between scrapes. The last scrape at or before a window's end closes that window and opens the next, so no increment is counted twice or skipped. A counter that falls has been reset by a restart. Increments between the last scrape and the restart are lost, and `counterResets` records that this happened. Histograms are summed across protocols, because rows are not split by protocol.
 
 ## A.11 `network.livepeer.gateway.ledgerDigest`
 
@@ -657,6 +666,7 @@ One record per gateway per window. The gateway chooses five-minute or per-round 
 |---|---|---|
 | `orchestrator`, `orchestratorUrl`, `work.runnerApp` | `create_signed_ticket` events: `orch_address`, `orch_url`, `app` | A0 |
 | `payments` | Distinct `pm_session_id` values, which are the rand hashes | A0 |
+| `payments.clientTagHashes` | Batteries, from the API key that paid for each session | A1 |
 | `ticketsSigned`, `billableSeconds`, `feeWei` | `num_tickets`, `billable_secs`, `computed_fee` | A0 |
 | `clientCount` | Distinct `auth_id` values, counted and never stored in records | A0 |
 | `runnerId`, `expectedValueWei` | New event fields: runner ID, face value and win probability | A1 |
@@ -752,7 +762,7 @@ One record per application per window. Publishing is optional for each applicati
 | `paidAttempts`, `feeWei` | Per-attempt cost classes from cost events | A0 |
 | `payer` | The allocation's signer, from the agent's configuration | A0 |
 | `runnerId`, `firstByteMs` | New attempt fields in Builder Core | A0, small Builder Core additions |
-| `payments` | The rand hash for each matched payment session, once Batteries includes it on usage rows | A1 |
+| `payments` | The rand hash and client tag of each matched payment session, once Batteries includes them on usage rows | A1 |
 | `offerSignatureFailures` | Builder Core's verification of signed offers | A1 |
 
 An application that runs its own gateway can take the rand hashes from its own signer events, and so publish `payments` before A1.
@@ -994,6 +1004,8 @@ Scorers, probers and dedicated labelers publish judgments with AT Protocol's sta
 - its value;
 - optionally an expiry;
 - optionally a negation, which withdraws an earlier label.
+
+Labels are signed with the `#atproto_label` key in the labeler's DID document, which may be the same as its repository key. Readers must not fall back to any other key. AT Protocol makes the signature optional, but attested discovery views ignore unsigned labels.
 
 Label values are lowercase, hyphenated and at most 128 bytes.
 
