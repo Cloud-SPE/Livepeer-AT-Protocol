@@ -2,7 +2,7 @@
 
 *Companion to [Operator-Owned Telemetry for the Livepeer Network](README.md). These drafts are for review. None is published, and every name may change before the governing LIP adopts them.*
 
-*Revised 2026-11-03 for livepeer-node, Clearinghouse Batteries and Livepeer Builder Core. The go-livepeer version remains in git history.*
+*Revised 2026-11-03 for livepeer-node, Clearinghouse Batteries and Livepeer Builder Core, and updated 2026-11-04 for livepeer-node's app registrations. The go-livepeer version remains in git history.*
 
 ## A.1 What changed in this revision
 
@@ -20,6 +20,9 @@
 | `jobFamily` with four families | Removed. The work key is the runner app, model and version | The new stack has one job family, the Live Runner |
 | Full rand hashes, at most 1,000 | 8-byte prefixes, at most 2,000 per row, with a Bloom filter for the rest | Size, and the decision recorded in [Appendix C](appendix-c-decisions-and-open-questions.md) |
 | Live video-to-video measures and NaaP's excused errors | Removed | Out of scope ([proposal §12](README.md#12-what-this-proposal-does-not-do)) |
+| Rows and inventory keyed by `runnerId` | Keyed by `appId`, the app registration ID; the inventory groups apps that share a runner with `runnerGroup` | Since livepeer/node `833dc2e` (#44), one runner can register several apps. Each app has its own ID, which appears in its URL; discovery no longer publishes runner IDs |
+| Client latency as time to first byte only | `headerMs` from Builder Core's call timings, with `firstByteMs` for streams | Builder Core records time to the runner's response headers, excluding signing, which matches the orchestrator's own header latency |
+| Signer-reported runner ID on ledger digest rows | Removed | The signer never sees which app registration it pays for; the orchestrator's payer rows carry it, joined by rand hash |
 
 ## A.2 Conventions
 
@@ -33,7 +36,7 @@
 ### Privacy
 
 5. **Nothing identifies an end user, a customer or an API key.** No schema has a field for a client IP address, prompt, request body, path, header, job ID, manifest ID, allocation or customer.
-6. **No free text.** Every string is one of these: a known value, an address, a DID, a hash, a timestamp, a URL or runner ID that livepeer-node discovery already publishes, or a runner app name or version as discovery publishes it. The telemetry agent checks every outbound record against its Lexicon and against this rule, so a configuration mistake cannot leak private data into a field.
+6. **No free text.** Every string is one of these: a known value, an address, a DID, a hash, a timestamp, a URL or app ID that livepeer-node discovery already publishes, or a runner app name or version as discovery publishes it. Runner IDs are not published: discovery does not show them, and a runner's operator may choose them freely. The telemetry agent checks every outbound record against its Lexicon and against this rule, so a configuration mistake cannot leak private data into a field.
 
 ### Summary records
 
@@ -83,11 +86,11 @@ The Lexicon JSON below is abbreviated where fields repeat a shared definition. D
 | `network.livepeer.operator.binding` | Orchestrator, gateway | The registered address | Proves that a DID and an on-chain address belong to one participant | A0 |
 | `network.livepeer.operator.policy` | Every publisher | `self` | Publication mode, windows and retention | A0 |
 | `network.livepeer.operator.affiliation` | Any participant | TID | Declares a relationship with another participant | A0 |
-| `network.livepeer.orch.inventory` | Orchestrator | TID | Endpoints and runners, hourly and on change | A0 |
+| `network.livepeer.orch.inventory` | Orchestrator | TID | Endpoints and the apps their runners registered, hourly and on change | A0 |
 | `network.livepeer.orch.offering` | Orchestrator | Hash of the work key | One record per work key offered. Approval and capability labels attach to it. | A0 |
-| `network.livepeer.orch.serviceReport` | Orchestrator | Window | Quality and metered payments per runner, and payments per payer | Runner rows A0; payer rows A1 |
+| `network.livepeer.orch.serviceReport` | Orchestrator | Window | Quality and metered payments per app registration, and payments per payer | Runner rows A0; payer rows A1 |
 | `network.livepeer.gateway.ledgerDigest` | Gateway | Window or round | Payments signed, per orchestrator and work key | A0; some fields A1 |
-| `network.livepeer.client.observation` | Application | Window | The application's experience, per orchestrator, runner and gateway | A0; rand hash prefixes A1 |
+| `network.livepeer.client.observation` | Application | Window | The application's experience, per orchestrator, app registration and gateway | A0; rand hash prefixes A1 |
 | `network.livepeer.client.demand` | Application | Window | Jobs that no runner could take | A0 |
 | `network.livepeer.probe.result` | Prober | Window | Test results, with capability and integrity checks | A0 |
 | `network.livepeer.probe.canaryReveal` | Prober | TID | Opens a canary commitment after the canary has been used | A0 |
@@ -136,7 +139,7 @@ The Lexicon JSON below is abbreviated where fields repeat a shared definition. D
       "properties": {
         "runnerApp": { "type": "string", "maxLength": 256, "description": "The runner app as livepeer-node discovery names it, such as 'blueclaw/chat/qwen3.8-27b'." },
         "model": { "type": "string", "maxLength": 256, "description": "The model, when the runner app or the client names it separately." },
-        "version": { "type": "string", "maxLength": 256, "description": "The version the runner advertises in discovery: an image digest or a release identifier. Lets labelers approve or exclude one version." }
+        "version": { "type": "string", "maxLength": 256, "description": "The app's version as discovery advertises it (apps[].version at registration), not the runner SDK's version: an image digest or a release identifier. Lets labelers approve or exclude one version." }
       }
     },
     "histogram": {
@@ -366,7 +369,7 @@ The agent builds the inventory from the orchestrator's own `/discovery` response
     "main": {
       "type": "record",
       "key": "tid",
-      "description": "The operator's orchestrator endpoints and their runners, as livepeer-node discovery reports them. The newest record is current; older records are history.",
+      "description": "The operator's orchestrator endpoints and the apps their runners have registered, as livepeer-node discovery reports them. The newest record is current; older records are history.",
       "record": {
         "type": "object",
         "required": ["endpoints", "observedAt"],
@@ -378,20 +381,21 @@ The agent builds the inventory from the orchestrator's own `/discovery` response
     },
     "endpoint": {
       "type": "object",
-      "required": ["serviceUrl", "runners"],
+      "required": ["serviceUrl", "apps"],
       "properties": {
         "serviceUrl": { "type": "string", "format": "uri", "description": "The orchestrator's HTTP(S) base URL: the address field of its /discovery entry. May be an IP address with a port other than 443." },
         "operatingAddress": { "type": "ref", "ref": "network.livepeer.defs#ethAddress", "description": "The node account this endpoint signs with. Must be listed in the binding." },
         "geoCell": { "type": "string", "maxLength": 16, "description": "Declared coarse location. Self-declared, and compared with measured latency." },
         "behindLoadBalancer": { "type": "boolean" },
-        "runners": { "type": "array", "maxLength": 512, "items": { "type": "ref", "ref": "#runner" } }
+        "apps": { "type": "array", "maxLength": 512, "items": { "type": "ref", "ref": "#app" }, "description": "One entry per ready app registration, matching one runner record in discovery. livepeer-node accepts at most 512 apps per node." }
       }
     },
-    "runner": {
+    "app": {
       "type": "object",
-      "required": ["runnerId", "work", "mode", "capacity"],
+      "required": ["appId", "work", "mode", "capacity"],
       "properties": {
-        "runnerId": { "type": "string", "maxLength": 128, "description": "As it appears in the runner's public URL. The runner chooses it, so it may change when the runner restarts." },
+        "appId": { "type": "string", "maxLength": 64, "description": "The app registration ID, as it appears in the app's URL (/apps/{appId}/…). livepeer-node generates it unless the runner supplies one, and the runner must keep it to keep the same ID, so it can change when a runner restarts." },
+        "runnerGroup": { "type": "integer", "minimum": 0, "description": "Apps in this record with the same value were registered by the same runner and share its hardware, so their GPU is one device and their capacities compete. Taken from the runner_id label in the orchestrator's own metrics. Meaningful only within one record; the runner ID itself is not published." },
         "work": { "type": "ref", "ref": "network.livepeer.defs#workKey" },
         "mode": { "type": "string", "knownValues": ["single-shot", "persistent"] },
         "gpu": { "type": "ref", "ref": "#gpu" },
@@ -436,6 +440,8 @@ The agent builds the inventory from the orchestrator's own `/discovery` response
 
 Discovery's free-form runner `metadata` is left out under the no-free-text rule. Capacity in use is left out too, because it changes on every poll. The service report carries it as capacity-seconds instead.
 
+**Apps and runners.** livepeer-node's discovery lists one runner record per app registration, and one runner can register several apps, each with its own route, version, capacity and price. Discovery does not say which apps share a runner. The orchestrator's own agent knows, from the `runner_id` label on its metrics, and records it as `runnerGroup` so that a GPU is not counted once per app. Third parties that read discovery directly see only apps.
+
 ## A.9 `network.livepeer.orch.offering`
 
 AT Protocol labels attach to a DID or to a record's URI. Approval and capability labels concern an orchestrator *and* a work key together, so each work key an orchestrator offers gets a record of its own for labels to attach to.
@@ -469,7 +475,7 @@ The agent changes an offering only when its status or endpoints change. A new ru
 ## A.10 `network.livepeer.orch.serviceReport`
 
 One record per orchestrator operator per window. It has two kinds of row:
-- **Runner rows** describe quality and metered payments per endpoint, runner and work key. They come from the metrics livepeer-node already exports, so they need no upstream change.
+- **Runner rows** describe quality and metered payments per endpoint, app registration and work key. They come from the metrics livepeer-node already exports, so they need no change to its code. They do need a livepeer-node release that includes the metrics: v1.0.6, the newest release as of 2026-11-04, predates them.
 - **Payer rows** describe payments per ticket sender. They come from the session outbox, an upstream change ([Appendix B](appendix-b-change-list.md)), and carry the rand hash prefixes that let the report be matched session by session.
 
 ```json
@@ -497,10 +503,10 @@ One record per orchestrator operator per window. It has two kinds of row:
     },
     "runnerRow": {
       "type": "object",
-      "required": ["endpoint", "runnerId", "work", "mode", "calls"],
+      "required": ["endpoint", "appId", "work", "mode", "calls"],
       "properties": {
         "endpoint": { "type": "string", "format": "uri" },
-        "runnerId": { "type": "string", "maxLength": 128 },
+        "appId": { "type": "string", "maxLength": 64, "description": "The app registration ID, from the app_id metrics label. The same ID appears in the app's URL, so client rows match on it." },
         "work": { "type": "ref", "ref": "network.livepeer.defs#workKey" },
         "mode": { "type": "string", "knownValues": ["single-shot", "persistent"] },
         "calls": { "type": "ref", "ref": "#callOutcomes" },
@@ -579,7 +585,7 @@ One record per orchestrator operator per window. It has two kinds of row:
       "properties": {
         "payer": { "type": "ref", "ref": "network.livepeer.defs#ethAddress", "description": "The ticket sender: a gateway's address." },
         "endpoint": { "type": "string", "format": "uri" },
-        "runnerId": { "type": "string", "maxLength": 128 },
+        "appId": { "type": "string", "maxLength": 64 },
         "work": { "type": "ref", "ref": "network.livepeer.defs#workKey" },
         "payments": { "type": "ref", "ref": "network.livepeer.defs#paymentRefs" },
         "ticketsAccepted": { "type": "integer", "minimum": 0 },
@@ -600,7 +606,8 @@ One record per orchestrator operator per window. It has two kinds of row:
 
 | Fields | Source | Phase |
 |---|---|---|
-| `calls` | `app_calls_total{app,runner_id,mode,protocol,outcome}` | A0 |
+| `appId`, `work.runnerApp`, `mode` | The `app_id`, `app` and `mode` labels that every app family carries | A0 |
+| `calls` | `app_calls_total{app,app_id,runner_id,mode,protocol,outcome}` | A0 |
 | `headerMs`, `callDurationSec` | `app_response_header_duration_seconds`, `app_call_duration_seconds` | A0 |
 | `bytesIn`, `bytesOut` | `stream_transfer_bytes_total{direction}` | A0 |
 | `reservations` | `session_reservations_total{outcome}` | A0 |
@@ -610,7 +617,7 @@ One record per orchestrator operator per window. It has two kinds of row:
 | `metered` | `payment_tickets_total{kind}`, `payment_credit_eth_total`, `payment_charge_eth_total`, `payment_billed_seconds_total`, `payment_fixed_charges_total` | A0 |
 | `payerRows` | The session outbox: one durable record per payment session | A1 |
 
-The agent computes each window's counts as counter increases between scrapes. The last scrape at or before a window's end closes that window and opens the next, so no increment is counted twice or skipped. A counter that falls has been reset by a restart. Increments between the last scrape and the restart are lost, and `counterResets` records that this happened. Histograms are summed across protocols, because rows are not split by protocol.
+The agent computes each window's counts as counter increases between scrapes. The last scrape at or before a window's end closes that window and opens the next, so no increment is counted twice or skipped. A counter that falls has been reset by a restart. Increments between the last scrape and the restart are lost, and `counterResets` records that this happened. Histograms are summed across protocols, because rows are not split by protocol. Rows are per app registration. livepeer-node gives each app ID to exactly one runner, so the `runner_id` label never splits a row. An app registered again under a new ID starts a new row.
 
 ## A.11 `network.livepeer.gateway.ledgerDigest`
 
@@ -645,7 +652,6 @@ One record per gateway per window. The gateway chooses five-minute or per-round 
       "properties": {
         "orchestrator": { "type": "ref", "ref": "network.livepeer.defs#ethAddress", "description": "The orchestrator address as the signer reported it. Aggregators resolve it to a registered address through bindings." },
         "orchestratorUrl": { "type": "string", "format": "uri" },
-        "runnerId": { "type": "string", "maxLength": 128, "description": "A1: a new signer event field." },
         "work": { "type": "ref", "ref": "network.livepeer.defs#workKey" },
         "payments": { "type": "ref", "ref": "network.livepeer.defs#paymentRefs" },
         "ticketsSigned": { "type": "integer", "minimum": 0 },
@@ -669,14 +675,16 @@ One record per gateway per window. The gateway chooses five-minute or per-round 
 | `payments.clientTagHashes` | Batteries, from the API key that paid for each session | A1 |
 | `ticketsSigned`, `billableSeconds`, `feeWei` | `num_tickets`, `billable_secs`, `computed_fee` | A0 |
 | `clientCount` | Distinct `auth_id` values, counted and never stored in records | A0 |
-| `runnerId`, `expectedValueWei` | New event fields: runner ID, face value and win probability | A1 |
+| `expectedValueWei` | New event fields: face value and win probability | A1 |
 | `offerHashes`, `offerSignatureFailures` | The signer's verification of signed challenges | A1 |
+
+Rows carry no app registration ID. The signer receives the ticket parameters and the app name, but not the app's URL, so it cannot tell which registration it is paying. The orchestrator's payer rows carry the app ID, and the rand hash links each session to them.
 
 The agent reads the same events Batteries consumes. Matching winning tickets to sessions is left to aggregators, which read redemptions from the chain themselves. Batteries performs the same match for its own operator.
 
 ## A.12 `network.livepeer.client.observation`
 
-One record per application per window. Publishing is optional for each application. Rows are keyed by orchestrator, runner, work key and paying gateway.
+One record per application per window. Publishing is optional for each application. Rows are keyed by orchestrator, app registration, work key and paying gateway.
 
 ```json
 {
@@ -706,7 +714,7 @@ One record per application per window. Publishing is optional for each applicati
       "properties": {
         "orchestratorUrl": { "type": "string", "format": "uri" },
         "orchestrator": { "type": "ref", "ref": "network.livepeer.defs#ethAddress", "description": "The recipient named in the payment challenge, when the agent has it. Otherwise aggregators resolve orchestratorUrl." },
-        "runnerId": { "type": "string", "maxLength": 128 },
+        "appId": { "type": "string", "maxLength": 64, "description": "The app registration ID, parsed from the attempt's runner URL: livepeer-node routes every app as /apps/{appId}/…." },
         "work": { "type": "ref", "ref": "network.livepeer.defs#workKey" },
         "payer": { "type": "ref", "ref": "network.livepeer.defs#ethAddress", "description": "The sender address of the gateway that paid. Absent for unpaid attempts." },
         "mode": { "type": "string", "knownValues": ["single-shot", "persistent"] },
@@ -715,7 +723,8 @@ One record per application per window. Publishing is optional for each applicati
         "paidFailedOver": { "type": "integer", "minimum": 0, "description": "Of those, attempts that had been paid." },
         "paidAttempts": { "type": "ref", "ref": "#costClasses" },
         "feeWei": { "type": "ref", "ref": "network.livepeer.defs#weiAmount", "description": "Fees matched to this row's attempts." },
-        "firstByteMs": { "type": "ref", "ref": "network.livepeer.defs#histogram", "description": "latency-ms-v1." },
+        "headerMs": { "type": "ref", "ref": "network.livepeer.defs#histogram", "description": "Time from sending the request the runner answered to its response headers: Builder Core's response_ms. Excludes the 402 round trips and signing, so a slow signer does not count against the orchestrator. Comparable with the orchestrator's headerMs, plus the network path. latency-ms-v1." },
+        "firstByteMs": { "type": "ref", "ref": "network.livepeer.defs#histogram", "description": "Streams: time from sending the request to the first byte of the body. latency-ms-v1." },
         "durationSec": { "type": "ref", "ref": "network.livepeer.defs#histogram", "description": "Attempt duration. duration-s-v1." },
         "paymentChallenges": { "type": "integer", "minimum": 0 },
         "paymentRefreshes": { "type": "integer", "minimum": 0 },
@@ -754,14 +763,15 @@ One record per application per window. Publishing is optional for each applicati
 }
 ```
 
-**Where the fields come from.** The agent reads Builder Core's events feed (`job.finished`, `cost.observed` and `cost.corrected`), with the application's `events.read` scope.
+**Where the fields come from.** The agent reads Builder Core's events feed (`job.finished`, `cost.observed` and `cost.corrected`). The feed is ISS-46 in Builder Core's M4. An ordinary actor reads only its own events there, so the agent uses an auditor's credential, which reads the whole application's. Payloads are snapshots: the agent replaces a job's state with each event, and drops events it has already applied by their ID, such as `job:{id}:finished`. It sends the feed's epoch with each poll. When the feed answers 410, after event retention or a restore, the agent resyncs as the feed's contract requires: it rebuilds job state from the paged `GET /v1/jobs`, continues from `resume_after`, and rebuilds the windows that changed, which publishes amendments for any that were final.
 
 | Fields | Source | Phase |
 |---|---|---|
-| `orchestratorUrl`, `work`, `mode`, `attempts`, `failedOver`, `paidFailedOver` | Each job's attempts and their outcomes | A0 |
+| `orchestratorUrl`, `appId`, `work`, `mode`, `attempts`, `failedOver`, `paidFailedOver` | Each job's attempts, their runner URLs and their outcomes. `http4xx` and `http5xx` split Builder Core's `http` outcome by status code. | A0 |
+| `headerMs` | Each attempt's `timings.response_ms` (Builder Core #89) | A0 |
 | `paidAttempts`, `feeWei` | Per-attempt cost classes from cost events | A0 |
 | `payer` | The allocation's signer, from the agent's configuration | A0 |
-| `runnerId`, `firstByteMs` | New attempt fields in Builder Core | A0, small Builder Core additions |
+| `firstByteMs` | A new attempt field in Builder Core | A0, a small Builder Core addition |
 | `payments` | The rand hash and client tag of each matched payment session, once Batteries includes them on usage rows | A1 |
 | `offerSignatureFailures` | Builder Core's verification of signed offers | A1 |
 
@@ -781,7 +791,7 @@ An application that runs its own gateway can take the rand hashes from its own s
     {
       "orchestratorUrl": "https://orch.example.com:8935",
       "orchestrator": "0x1111111111111111111111111111111111111111",
-      "runnerId": "r1",
+      "appId": "app-k3x9q",
       "work": { "runnerApp": "blueclaw/chat/qwen3.8-27b" },
       "payer": "0x2222222222222222222222222222222222222222",
       "mode": "single-shot",
@@ -790,7 +800,7 @@ An application that runs its own gateway can take the rand hashes from its own s
       "paidFailedOver": 0,
       "paidAttempts": { "delivered": 41, "uncertain": 1 },
       "feeWei": "8610000000000000",
-      "firstByteMs": { "bounds": "latency-ms-v1", "counts": [0, 0, 0, 0, 0, 3, 19, 15, 4, 0, 0, 0, 0, 0] },
+      "headerMs": { "bounds": "latency-ms-v1", "counts": [0, 0, 0, 0, 0, 3, 19, 15, 4, 0, 0, 0, 0, 0] },
       "paymentChallenges": 42,
       "payments": { "sessions": 42, "randHashPrefixes": { "$bytes": "…336 bytes, base64…" } }
     }

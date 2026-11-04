@@ -2,7 +2,7 @@
 
 *A design proposal for collecting Livepeer job data without a central collector, using AT Protocol for publication and Livepeer's on-chain state for trust.*
 
-**Status:** Draft for design feedback · **Revised:** 2026-11-03 (first draft 2026-09-28) · **Scope:** Live Runner work on livepeer-node, used by applications built on Livepeer Builder Core
+**Status:** Draft for design feedback · **Revised:** 2026-11-04 (first draft 2026-09-28) · **Scope:** Live Runner work on livepeer-node, used by applications built on Livepeer Builder Core
 
 **What changed in this revision.** The first draft was written for go-livepeer, which is now deprecated. This revision targets the software that replaces it:
 - livepeer-node: the orchestrator, the remote signer and the discovery service;
@@ -17,6 +17,8 @@ It also adopts the main corrections from the [implementation plan](implementatio
 - a publication policy that protects participants' business data.
 
 The go-livepeer version remains in git history.
+
+An update on 2026-11-04 follows two upstream changes: livepeer-node now lets one runner serve several apps, and Builder Core's events feed moved to its M4.
 
 **New to AT Protocol?** Start with the [AT Protocol primer for Livepeer operators](at-protocol-primer.md).
 
@@ -69,7 +71,7 @@ Every component in the new stack records something useful. None of it leaves the
 
 | Component | What it records | Where it goes |
 |---|---|---|
-| livepeer-node orchestrator | Calls, response latency, bytes, session ends and their causes, tickets credited, charges and redemptions, per runner app and runner | Its operator's Prometheus. The metrics were added upstream in October 2026. |
+| livepeer-node orchestrator | Calls, response latency, bytes, session ends and their causes, tickets credited, charges and redemptions, per app registration and runner | Its operator's Prometheus. The metrics were merged upstream in October 2026, and will ship in the first release after v1.0.6. |
 | Remote signer | One `create_signed_ticket` event per signing. It names the orchestrator, runner app, billable seconds and fee. | Its operator's Kafka topic, consumed by Batteries |
 | Batteries | Every authorization and charge, in an append-only ledger. It also matches on-chain redemptions to its own signing sessions. | Its operator's database and management API |
 | Discovery services | Each orchestrator's runner inventory | Memory only; not kept |
@@ -264,11 +266,11 @@ flowchart LR
 
 | Component | Run by | New or existing | Needed from |
 |---|---|---|---|
-| Orchestrator metrics per runner app and runner | Orchestrator operator | Existing in upstream livepeer-node | Phase A0 |
+| Orchestrator metrics per app registration and runner | Orchestrator operator | Merged in upstream livepeer-node; in the first release after v1.0.6 | Phase A0 |
 | Orchestrator session outbox: one durable record per payment session | Orchestrator operator | New; an upstream livepeer-node change | Phase A1 |
-| Remote signer events | Gateway operator | Existing; three new fields | A0, new fields A1 |
+| Remote signer events | Gateway operator | Existing; two new fields | A0, new fields A1 |
 | Batteries ledger and settlement matching | Gateway operator | Existing; one new field, the rand hash on usage rows | A0, new field A1 |
-| Builder Core events feed | Application | Exists once Builder Core's milestones are complete; a few new fields | Phase A0 |
+| Builder Core events feed | Application | Arrives in Builder Core's M4, which ends in December 2026; a few new fields | Phase A0, from January 2027 |
 | Telemetry agent and repository | Every publisher | New ([§2.4](#24-the-telemetry-agent)) | Phase A0 |
 | Chain indexer | Anyone | New; extracted from Batteries' TicketBroker listener | Phase A0 |
 | Relays | Anyone; Cloud SPE first | Existing AT Protocol software, scoped to Livepeer participants | Phase A0 |
@@ -313,7 +315,7 @@ Builder Core, the remote signer and livepeer-node's discovery service all accept
 - the remote signer through its `Orchestrators` list;
 - livepeer-node's discovery service through its `Nodes` list.
 
-Filtering therefore needs no change to any of them.
+Filtering therefore needs no change to any of them. The signer and livepeer-node's discovery service read at most 1 MiB from one source, about 2,000 runner records, so a view that feeds them serves only what its consumer needs.
 
 Ranking and weighting need one addition: a Builder Core `SelectionPolicy` plugin. Builder Core reorders candidates by free capacity, which would undo any order the view imposed. The plugin is an extension point Builder Core already provides, so Builder Core itself does not change.
 
@@ -439,12 +441,14 @@ No transaction and no governance action is required.
 
 ### 4.3 Describing an orchestrator's runners
 
-livepeer-node already describes an orchestrator's runners. Its `/discovery` response lists, for each runner:
-- the runner's ID, runner app and version;
+livepeer-node already describes an orchestrator's runners. A runner registers one or more apps with its orchestrator, and each app registration gets its own ID, route, version, capacity and price. The `/discovery` response lists one runner record for each ready app registration:
+- its URL, which carries the app ID, and its runner app and version;
 - its GPU;
 - its capacity and the capacity still free;
 - its price;
 - when it was last observed.
+
+It does not say which apps share a runner.
 
 What the response lacks is any proof of origin. It is unsigned, discovery services index it by URL rather than by address, and nobody keeps it after the next poll.
 
@@ -453,7 +457,9 @@ We propose two changes:
 - **Sign each runner record.** The orchestrator adds its registered address to each runner record in its discovery response, and signs the record with an operating key that its binding authorizes. A consumer can then attribute every price, capacity and hardware claim to an on-chain identity. Signing each record, rather than the whole response, lets the signatures survive discovery services, which merge runners from many sources.
 - **Publish an inventory record.** The agent writes an `orch.inventory` record hourly, and whenever the inventory changes. The record lists the operator's orchestrator endpoints and their runners. This keeps the history that discovery caches discard. It also lets one operator describe several orchestrator endpoints under one address, which the on-chain registry, holding one URI per address, cannot do.
 
-Records identify runners by runner app and runner ID. Labels and approvals should attach to the orchestrator, runner app and model version instead. The agent therefore also writes one small `orch.offering` record for each work key the orchestrator offers, so that a label has a subject to attach to. livepeer-node lets each runner choose its own ID and keeps runner credentials only in memory, so a runner ID can change when a runner restarts.
+Records identify an app registration by its app ID. The ID appears in the app's URL, so the orchestrator's metrics and Builder Core's attempts both carry it, and their records match on it. Runner IDs stay out of published records, which only group the apps that share a runner.
+
+Labels and approvals should attach to the orchestrator, runner app and model version instead. The agent therefore also writes one small `orch.offering` record for each work key the orchestrator offers, so that a label has a subject to attach to. livepeer-node generates app IDs unless a runner keeps them, and holds runner credentials only in memory, so an app's ID can change when its runner restarts.
 
 ---
 
@@ -497,9 +503,9 @@ Only the billing unit differs:
 | Persistent session priced per hour | Seconds, charged as they elapse |
 | Single-shot call | A fixed price per call |
 
-Since October 2026, livepeer-node counts both functions' work per runner app and runner. It counts tickets accepted and winning, expected value credited, charges, billed seconds and fixed charges. It also counts calls by outcome, response-header latency, bytes and session ends by cause.
+Since October 2026, livepeer-node counts both functions' work per app registration and runner. It counts tickets accepted and winning, expected value credited, charges, billed seconds and fixed charges. It also counts calls by outcome, response-header latency, bytes and session ends by cause.
 
-Two things are still missing: the payer of each session, and the session itself. Prometheus counters cannot carry per-session values, and livepeer-node's metrics deliberately keep session identifiers and payer strings out of their labels. A small durable outbox closes the gap: one record per payment session, carrying its rand hash, payer, runner app, runner, credit, charges, tickets, winners and end cause ([Appendix B](appendix-b-change-list.md)).
+Two things are still missing: the payer of each session, and the session itself. Prometheus counters cannot carry per-session values, and livepeer-node's metrics deliberately keep session identifiers and payer strings out of their labels. A small durable outbox closes the gap: one record per payment session, carrying its rand hash, payer, runner app, app registration, credit, charges, tickets, winners and end cause ([Appendix B](appendix-b-change-list.md)).
 
 ### 5.3 Summaries, not events
 
@@ -518,7 +524,7 @@ The new stack has one job family, the Live Runner. Records describe work with a 
 | Measured by | Measurements |
 |---|---|
 | Orchestrator, as reverse proxy | Calls and sessions by outcome, time to the response header, bytes, session length, cause of each session's end, capacity refusals |
-| Application, through Builder Core | Attempts by outcome, failovers, paid calls that failed, time to first byte, the payment refusals it met, and jobs that found no runner |
+| Application, through Builder Core | Attempts by outcome, failovers, paid calls that failed, time to the runner's response headers and, for streams, to the first byte, the payment refusals it met, and jobs that found no runner |
 | Gateway | Sessions signed, expected value, billable seconds, fees |
 
 Neither the orchestrator nor Builder Core interprets request or response bodies. That keeps application content out of every record (R6). It also means quality measures specific to an application need extensions, published by the application or by a prober. Examples are tokens per second for a language model, frame rate for video, or whether a model honors structured output. livepeer-node's own metrics contract makes the same point: payload failures, inference latency, frame rate and GPU use require runner telemetry. Each extension is named for its runner app, so no consumer breaks when one is added.
@@ -806,7 +812,7 @@ Publishing is not mandated. Instead, applications and signers may treat the abse
 
 To meet R7, every role installs the same telemetry agent, configured with one file. An orchestrator's agent reads the metrics livepeer-node already exports, so publishing needs no orchestrator change until the session outbox arrives.
 
-Stable runner identity would help pool management even without this proposal. livepeer-node issues each runner its own credential after it registers, but keeps the credential only in memory and lets the runner choose its ID. A runner's identity therefore does not survive a restart.
+Stable runner identity would help pool management even without this proposal. livepeer-node issues each runner its own credential after it registers, but keeps the credential only in memory. It generates app IDs unless the runner keeps them. A runner's identity, and its apps' IDs, therefore do not reliably survive a restart.
 
 ---
 
@@ -828,7 +834,7 @@ Stable runner identity would help pool management even without this proposal. li
 - The pilot publishes under an experimental namespace and migrates at adoption.
 - Lexicon resolution runs through DNS. Each group of schemas resolves through its own TXT record: `network.livepeer.orch.*` through `_lexicon.orch.livepeer.network`, for example. The LIP must therefore name whoever controls the `livepeer.network` domain.
 
-**Pilot scope.** Live Runner work on livepeer-node, by applications built on Builder Core. The pilot assumes that Builder Core's milestones M1 to M5 are complete, including its events feed.
+**Pilot scope.** Live Runner work on livepeer-node, by applications built on Builder Core. The pilot assumes that Builder Core's milestones M1 to M5 are complete, including its events feed. The feed arrives in M4, which ends on 18 December 2026, and M5 ends on 31 December, so applications start publishing in January 2027. Orchestrators need the first livepeer-node release after v1.0.6, which will include the metrics their records are built from.
 
 **Pilot participants.**
 
@@ -850,7 +856,7 @@ Stable runner identity would help pool management even without this proposal. li
   - a shadow scorer.
 - **A1 adds the upstream changes:**
   - the orchestrator's session outbox, which gives orchestrator records a payer dimension and rand hashes;
-  - the three new signer event fields;
+  - two new signer event fields, face value and win probability;
   - the rand hash on Batteries usage rows, which lets application records be matched session by session;
   - signed runner records and payment challenges.
 
