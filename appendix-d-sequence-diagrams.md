@@ -86,8 +86,8 @@ sequenceDiagram
   O->>R: proxy the request (today)
   R-->>O: response
   O-->>App: response, counted by outcome, latency, and bytes (today)
-  O->>O: write the session outbox record with rand hash, payer, runner, credit, and charge (A1)
-  App->>App: attempt succeeded, with its cost pending until Batteries reports it (today)
+  O->>O: write the session outbox record with rand hash, payer, app registration, credit, and charge (A1)
+  App->>App: attempt succeeded, with its call timings, and its cost pending until Batteries reports it (today)
   B->>B: debit the allocation from the signer event (today)
   App->>B: cost sync reads usage rows, now carrying the rand hash (field A1)
   loop every five minutes, through each party's telemetry agent

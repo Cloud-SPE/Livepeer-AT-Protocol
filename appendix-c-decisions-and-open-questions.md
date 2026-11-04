@@ -2,9 +2,9 @@
 
 *Companion to [Operator-Owned Telemetry for the Livepeer Network](README.md). This appendix records what the authors have already decided, so reviewers can focus their feedback on what remains open.*
 
-*Revised 2026-11-03 for livepeer-node, Clearinghouse Batteries and Livepeer Builder Core.*
+*Revised 2026-11-03 for livepeer-node, Clearinghouse Batteries and Livepeer Builder Core, and updated 2026-11-04 for livepeer-node's app registrations and Builder Core's revised milestones.*
 - *Decisions D1 to D17 keep their numbers. Those marked "revised" changed with the new stack.*
-- *D18 onward are new. Several come from the first draft of the [implementation plan](implementation-plan.md).*
+- *D18 onward are new. Several come from the first draft of the [implementation plan](implementation-plan.md). D24 and D26 were revised, and D35 to D37 added, on 2026-11-04.*
 
 ## C.1 Decisions taken
 
@@ -33,9 +33,9 @@
 | D21 | Every publisher runs the same telemetry agent: one Go binary, separate from the software it reads, and outside every request path. | One artifact for every role keeps participation cheap (R7), and stopping the agent stops publication and nothing else. |
 | D22 | One record per publisher per window, carrying an array of rows, under a key derived from the window. | Keeps every repository far below its size ceiling, and makes a republish replace the record instead of duplicating it. |
 | D23 | Records are matched on the recipient rand hash, published as 8-byte prefixes. A row lists at most 2,000, with a Bloom filter for the rest. Each publisher chooses five-minute or per-round windows. | No single party chooses the rand hash, all three parties hold it, and redemptions reveal it on-chain. Prefixes cut its size by three quarters, and collisions are negligible. |
-| D24 | Phase A is split. A0 needs no upstream change; A1 adds the changes to livepeer-node and Batteries. | Evidence can begin before upstream review, which no one in the pilot controls. |
+| D24 | *Revised.* Phase A is split. A0 needs no upstream change; A1 adds the changes to livepeer-node and Batteries. A0's orchestrator mode does need the first livepeer-node release after v1.0.6, which ships metrics already merged. | Evidence can begin before upstream review, which no one in the pilot controls. A release of merged code is a much smaller dependency than a review. |
 | D25 | Scores and labels reach selection through an attested discovery view in livepeer-node's `/discovery` format, and through a Builder Core selection policy plugin. | Builder Core, the remote signer and the discovery service all accept that format already, so none of them changes. |
-| D26 | The design assumes Builder Core's milestones M1 to M5 are complete, including its events feed. | They will be complete before this work begins. |
+| D26 | *Revised.* The design assumes Builder Core's milestones M1 to M5 are complete, including its events feed, before any agent reads Builder Core. Application and prober modes therefore start in January 2027. Gateway mode, the chain indexer and the aggregator start earlier. | The events feed moved to M4, which ends on 18 December 2026, and M5 ends on 31 December. The roles that do not read Builder Core need not wait for it. |
 | D27 | Cloud SPE is the first prober, built as an ordinary Builder Core application, and pays through a gateway that real applications also use. | It measures what an application would get, and its payments do not single out its probes. |
 | D28 | From Phase B, five safety rails apply: fail open, a candidate floor, an exploration share that is never zero, a cap on how fast a score can move, and a quorum of independent scorers. | Scores must not be able to concentrate traffic, starve new orchestrators, or let one scorer control selection. |
 | D29 | Labels about an orchestrator and a work key together attach to an `orch.offering` record, one per work key the orchestrator offers. | AT Protocol labels attach to a DID or a record. Approvals and capabilities concern a work key, not the whole orchestrator. |
@@ -44,6 +44,9 @@
 | D32 | From A1, an application proves which sessions it paid for with a client tag that Batteries derives from a per-key secret. Gateways publish only a hash of each tag. | Rand hash prefixes are public, so without tags anyone could copy a gateway's sessions into an observation and misreport them. |
 | D33 | Verification is per commit. A record counts if the commit it arrived in is signed by a key that a binding valid at that commit's time names. A commit's time is when an independent relay or mirror first saw it. | AT Protocol signs commits, not records. Checking the binding at the record's window would reject a repository's whole history after a key rotation. |
 | D34 | This design's mirrors keep records after their authors delete them, and the LIP says so. | Accountability is the mirrors' purpose. Network mirrors such as Hubble honor deletion, so they cannot serve it. Records hold no personal data, which makes keeping them acceptable. |
+| D35 | Records identify an app registration by its app ID. Runner IDs are not published. An inventory record groups the apps that share a runner by a number that means something only within that record. | Since livepeer-node's #44, one runner can register several apps, each with its own ID. The app ID appears in every URL, so the orchestrator's metrics and Builder Core's attempts both carry it, and their rows match on it. Runner IDs are not in discovery, and their operators may choose them freely. |
+| D36 | The signer event change (U-1) adds face value and win probability only, not a runner or app ID. | The signer receives the ticket parameters, the app name and the manifest ID, none of which names the app registration. Adding one would need an SDK change too. The orchestrator's session outbox carries the app ID, and the rand hash joins it to the gateway's records. |
+| D37 | An application's latency to an orchestrator is the time to the runner's response headers, from Builder Core's call timings. Time to first byte is measured for streams only. | Builder Core already records it, and it excludes signing, so a slow signer does not count against the orchestrator. It times the same span as the orchestrator's header latency, so the difference is the network path. |
 
 ## C.2 Context the decisions rest on
 
@@ -58,13 +61,13 @@
   - ChatLPT keeps a hand-picked list of five orchestrators. It found that three of them use self-signed certificates, which Builder Core cannot verify.
   - inference-gateway ran 34 test operations on 26 October 2026 to establish which orchestrators and features work for its models, and committed the results to its repository.
 - **Telemetry today.**
-  - livepeer-node gained detailed operational metrics per runner app and runner in October 2026. They have no payer dimension and no per-session records.
+  - livepeer-node gained detailed operational metrics per app registration and runner in October 2026. They have no payer dimension and no per-session records. The newest release, v1.0.6, predates them.
   - The signer reports every signing to its operator's Batteries.
-  - Builder Core records every attempt and its cost in the application's database.
+  - Builder Core records every attempt, its call timings and its cost in the application's database. Its events feed arrives in M4 (ISS-46).
 - **Gateways.** An application may run its own gateway, as ChatLPT does, or pay through someone else's.
 - **Probers.** Cloud SPE, funded by the treasury, sends test jobs. Livepeer Inc's Livepeer Agent is expected to join once the system is built.
 - **Registries.** livepeer-node's chain tool writes the protocol `ServiceRegistry`. Builder Core's on-chain directory reads the `AIServiceRegistry` by default.
-- **Runner identity.** livepeer-node lets each runner choose its own ID, and keeps runner credentials in memory only.
+- **Runner identity.** Since #44, a runner can register several apps with one orchestrator, each with its own ID, route, version, capacity and price. livepeer-node generates app IDs unless the runner keeps them, and keeps runner credentials in memory only.
 
 ## C.3 Open questions
 
@@ -118,6 +121,13 @@
 28. Which attestation technologies are affordable enough to support, and when should `attested` labels begin to affect selection?
 29. How should an application or SPE that trusts several labelers combine their approval and exclusion labels into one decision?
 30. TLS and DNS checks need a probe runner app on the orchestrator's hosts. Will orchestrators host one, and is a check that the orchestrator knows about worth running?
+
+### Interfaces to upstream software
+
+*Added 2026-11-04.*
+
+31. The remote signer and livepeer-node's discovery service read at most 1 MiB from one discovery source, about 2,000 runner records. Should that limit be raised for attested discovery views, or should views always serve narrowed inventories?
+32. Builder Core's events feed guide leaves open who may read which events (ISS-46, its Q2). The agent assumes the recommended answer, under which an auditor reads the whole application. If the feed settles otherwise, which credential should the agent use?
 
 ## C.4 What happened to the first draft's questions
 

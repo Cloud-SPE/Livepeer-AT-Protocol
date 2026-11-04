@@ -2,7 +2,7 @@
 
 *An implementation plan for the [Operator-Owned Telemetry proposal](README.md): what to build, who runs it, in what order, and how we will know it works.*
 
-**Status:** Draft for discussion · **Revised:** 2026-11-03 (first draft 2026-10-04) · **First aggregator operator:** Cloud SPE
+**Status:** Draft for discussion · **Revised:** 2026-11-04 (first draft 2026-10-04) · **First aggregator operator:** Cloud SPE
 
 **Companion documents:** [Proposal](README.md) · [AT Protocol primer](at-protocol-primer.md) · [A. Record schemas](appendix-a-record-schemas.md) · [B. Change list](appendix-b-change-list.md) · [C. Decisions and open questions](appendix-c-decisions-and-open-questions.md) · [D. Sequence diagrams](appendix-d-sequence-diagrams.md)
 
@@ -13,6 +13,13 @@
 - the Python gateway SDK.
 
 [§2](#2-what-changed-since-the-first-draft) lists where each earlier correction now lives, and what the new stack changed.
+
+**Update, 2026-11-04.** Upstream moved after the 2026-11-03 revision:
+- livepeer-node's #44 lets one runner register several apps, each with its own ID. Records now identify an app registration by that ID ([§2.2](#22-what-the-new-stack-changed), item 10).
+- livepeer-node's newest release, v1.0.6, predates the metrics that orchestrator mode reads.
+- Builder Core moved its events feed from M3 to M4, which ends on 18 December 2026. Application mode now starts in January 2027 ([§12.2](#122-phases-and-gates)).
+- Builder Core now records each call's time to the runner's response headers, which replaces most of the planned first-byte addition.
+- The signer cannot see which app registration it pays, so the runner ID is dropped from the signer change U-1.
 
 ---
 
@@ -26,10 +33,10 @@
 - **History.** Mirrors and a cold archive.
 
 **What already exists.** Most of the data:
-- livepeer-node's metrics per runner app and runner, added upstream in October 2026;
+- livepeer-node's metrics per app registration and runner, merged upstream in October 2026 and due in the first release after v1.0.6;
 - the remote signer's event for every signing, which already carries the rand hash;
 - Batteries' ledger and its matching of on-chain redemptions;
-- Builder Core's attempt outcomes, cost classes and events feed.
+- Builder Core's attempt outcomes, call timings and cost classes, and its events feed once its M4 lands.
 
 The SDK already tries runners in the order discovery returns them. Builder Core, the signer and the discovery service all accept a `/discovery` source. Scores can therefore reach selection without changing any of them.
 
@@ -83,11 +90,11 @@ livepeer-node provides the orchestrator, the remote signer, a standalone discove
 
 | Area | What exists | Gap for this plan |
 |---|---|---|
-| Orchestrator metrics | Since October 2026, per runner app and runner: calls by outcome, response-header latency, call and session duration, bytes, reservations, session ends by reason, health checks, capacity, and payment counters. Served on a loopback listener. | No payer dimension and no per-session records, by design. Counters reset on restart. ETH values are approximate. |
-| Payments | `PaymentEngine.MakeChallenge`, `Receive` and `Charge`. A fresh rand hash for every challenge, and again on each 480 refresh. Payment state in a SQLite store. | Nothing is kept per session once it ends. |
-| Discovery | `/discovery` lists each runner's URL, app, version, mode, GPU, capacity and price. Standalone discovery merges sources, keeps complete runner records, and chooses each runner by its newest `observed_at`. | Unsigned. `address` is a URL, not an Ethereum address. The cache is not kept. |
-| Remote signer | `/generate-live-payment`, `/discover-orchestrators`, and a `create_signed_ticket` event for every signing, written durably before payment is returned | Events lack runner ID, face value and win probability |
-| Runner registry | Dynamic runners with heartbeat, and static runners from configuration | Runner IDs are chosen by the runner. Credentials are kept in memory only. |
+| Orchestrator metrics | Merged in October 2026, per app registration and runner: calls by outcome, response-header latency, call and session duration, bytes, reservations, session ends by reason, health checks, capacity, and payment counters. Labelled `app`, `app_id` and `runner_id`. Served on a loopback listener. | Not yet in a release: v1.0.6 predates them. No payer dimension and no per-session records, by design. Counters reset on restart. ETH values are approximate. |
+| Payments | `PaymentEngine.MakeChallenge`, `Receive` and `Charge`, keyed by app registration. A fresh rand hash for every challenge, and again on each 480 refresh. Payment state in a SQLite store. | Nothing is kept per session once it ends. |
+| Discovery | `/discovery` lists one runner record per ready app registration: its URL, which carries the app ID, and its app, version, mode, GPU, capacity and price. Standalone discovery merges sources, keeps complete runner records, and chooses each runner by its newest `observed_at`. | Unsigned. `address` is a URL, not an Ethereum address. Nothing says which apps share a runner. The cache is not kept. |
+| Remote signer | `/generate-live-payment`, `/discover-orchestrators`, and a `create_signed_ticket` event for every signing, written durably before payment is returned | Events lack face value and win probability. The signer never learns which app registration it pays. |
+| Runner registry | Since #44, a dynamic runner sends a snapshot of all its apps with each heartbeat, so one runner can serve several apps. Static runners come from configuration. | App IDs are generated unless the runner keeps them. Credentials are kept in memory only. |
 | Chain tool | Writes the protocol `ServiceRegistry` | Builder Core reads the `AIServiceRegistry` by default |
 
 ### 1.2 Clearinghouse Batteries
@@ -105,13 +112,13 @@ A single Go binary with SQLite storage. It provides:
 
 The engine that enterprise applications build on. This plan assumes its milestones M1 to M5 are complete.
 
-- **Jobs and attempts.** Each attempt records the runner URL, the orchestrator URL, whether payment was sent, an outcome from a fixed set, the status code and timestamps.
+- **Jobs and attempts.** Each attempt records the runner URL, the orchestrator URL, whether payment was sent, an outcome from a fixed set, the status code and timestamps. Since #89 it also records where the call's time went: the unpaid requests until their 402s, signing, and the time until the runner's response headers.
 - **Failover.** Decision D52 fixes when a job moves to another runner. A paid failover never pays the same orchestrator twice.
 - **Cost.** Every paid attempt gets a cost class: `delivered`, `failed_after_payment`, `uncertain` or `pending`.
-- **Events feed.** Job and cost events, read with a cursor (decision D10).
+- **Events feed.** Job and cost events, read with a cursor (Builder Core's decision D10). It moved from M3 to M4 as ISS-46. Builder Core's M4 runs from 23 November to 18 December 2026, and M5 from 21 to 31 December.
 - **Extension points.** `SelectionPolicy`, `DiscoverySource` and `OrchestratorDirectory`, chosen when the application assembles its engine.
 
-**Gaps.** No first-byte time on attempts, and no rand hash until Batteries provides one.
+**Gaps.** No time to the first byte of a stream, and no rand hash until Batteries provides one.
 
 ### 1.4 Python gateway SDK
 
@@ -181,6 +188,7 @@ NaaP's pipeline runs ClickHouse with layered materialized views, a Go resolver a
 7. **Labels need a record to attach to.** Approvals and capabilities concern an orchestrator and a work key together, which is why each work key gets an `orch.offering` record.
 8. **Two service registries are in use.** livepeer-node's chain tool writes one, and Builder Core reads the other by default. The identity service reads both.
 9. **In-sandbox checks need a probe runner app.** Applications no longer run their own workloads on orchestrators' hosts. Canaries still travel in requests to any orchestrator. TLS and DNS checks need a probe runner app on hosts that agree to run one.
+10. **Records identify app registrations, not runners.** Since livepeer-node's #44, one runner can register several apps, each with its own ID, route, version, capacity and price. The app ID appears in every URL, so the orchestrator's metrics and Builder Core's attempts both carry it, and rows on both sides match on it. Runner IDs appear only in the orchestrator's own metrics. They are not published; an inventory record only groups the apps that share a runner.
 
 ---
 
@@ -280,11 +288,11 @@ One Go binary, with one container image and one configuration file. It is built 
 
 | Subsystem | Responsibility | Built on |
 |---|---|---|
-| Input: metrics scraper | Scrapes livepeer-node's loopback `/metrics` every 15 seconds and turns counters into window deltas, handling restarts | Prometheus client libraries |
+| Input: metrics scraper | Scrapes livepeer-node's loopback `/metrics` every 15 seconds and turns counters into window deltas per app registration, handling restarts | Prometheus client libraries |
 | Input: discovery reader | Reads the orchestrator's own `/discovery` for its inventory and offerings | — |
 | Input: session outbox reader | Reads livepeer-node's session outbox with a stored cursor (A1) | — |
 | Input: signer events | Reads the signer's topic from Batteries' embedded broker, with its own offsets | Kafka client |
-| Input: Builder Core events | Reads `GET /v1/events` with a stored cursor and the application's `events.read` scope | — |
+| Input: Builder Core events | Reads `GET /v1/events` with a stored cursor and the feed's epoch, using an auditor's credential so that it sees the whole application. Treats each payload as a snapshot. On a 410, rebuilds from the paged `GET /v1/jobs` ([Appendix A §A.12](appendix-a-record-schemas.md#a12-networklivepeerclientobservation)). | — |
 | Input: probes | Capability, canary and probe runner app results from the prober | — |
 | Redaction | An allowlist per input. Fields are dropped at ingest, before anything is stored. | — |
 | Local event store | SQLite in write-ahead-log mode, one table per input, retention per policy | — |
@@ -466,7 +474,7 @@ During migration, the aggregator reads both namespaces.
 
 ### 5.2 Histogram bounds
 
-Version 1 adopts livepeer-node's buckets ([Appendix A §A.2](appendix-a-record-schemas.md#a2-conventions)), so orchestrator rows built from metrics are exact, and applications bucket their own first-byte times to match. The parity test decides whether these bounds are dense enough. If the latency row fails, version 2 can be built from the session outbox, which records each single-shot call exactly, without changing the metrics.
+Version 1 adopts livepeer-node's buckets ([Appendix A §A.2](appendix-a-record-schemas.md#a2-conventions)), so orchestrator rows built from metrics are exact, and applications bucket their own header and first-byte times to match. The parity test decides whether these bounds are dense enough. If the latency row fails, version 2 can be built from the session outbox, which records each single-shot call exactly, without changing the metrics.
 
 ### 5.3 Retention, compaction and pruning
 
@@ -495,7 +503,7 @@ The engine works on **pair-windows**: one payer address, one orchestrator addres
 | S2 | Redemption anchor | For each redemption, hash the revealed rand value, find the published rows holding its prefix, and mark the pair-window *anchored* | A0 for gateway digests; A1 for the others | Exact proof that the business happened, in the window both sides named |
 | S3 | Volume consistency | Compare expected wins, from the published tickets and expected value, with observed redemptions, using a Poisson interval over a rolling seven-round window | A0 | Statistical. Weak for small pairs, strong for whole-gateway totals. |
 | S4 | Application and gateway totals | Compare an application's paid attempts with its gateway's sessions per orchestrator and window, when the application names the gateway | A0 | Medium. Becomes S1 when rand hashes arrive. |
-| S5 | Client view versus orchestrator view | Compare an application's first-byte times and failures with the orchestrator's header latency and call outcomes for the same runner | A0 | Medium. Detects an orchestrator whose own view hides failures. |
+| S5 | Client view versus orchestrator view | Compare an application's time to response headers and its failures with the orchestrator's header latency and call outcomes, for the same app registration. Both sides time the same thing, so the difference is the network path. | A0 | Medium. Detects an orchestrator whose own view hides failures. |
 | S6 | Probe agreement | Compare probe results with independent applications' results for the same orchestrator and vantage cluster | A0 | Medium. Also detects special treatment of probes. |
 | S7 | Declared versus measured | Compare the declared GPU with measured performance against the work key's cohort, and the declared location with latency | A0 | Labels only |
 
@@ -545,7 +553,7 @@ Deposits and test traffic are a line in the prober's budget ([§12.6](#126-fundi
 |---|---|---|
 | Reliability | Attempts that succeeded, out of attempts that reached the orchestrator. Capacity refusals are excluded when the orchestrator's published capacity was exhausted at the time, so honest reporting of a full runner is not punished. | 0.5 |
 | Paid failure | One minus the share of paid attempts that ended `failed_after_payment` or `uncertain` | 0.2 |
-| Latency | Time to first byte, as a percentile rank against other runners of the same runner app in the same cluster | 0.2 |
+| Latency | Time to the runner's response headers as the client measured it, which excludes signing, as a percentile rank against other runners of the same runner app in the same cluster. For streams, time to first byte, once Builder Core records it. | 0.2 |
 | Session health | One minus the share of sessions that ended for a cause that lies with the orchestrator or its runner: runner stopped, unregistered, expired or unhealthy, shutdown, or billing error | 0.1 |
 
 The score is `10000 × coverage × weighted sum`, in basis points, with shrinkage toward the cohort mean for sparse data. The confidence comes from the effective sample size after weighting. Scores are frozen at the hour plus 15 minutes.
@@ -555,7 +563,7 @@ The score is `10000 × coverage × weighted sum`, in basis points, with shrinkag
 ### 7.2 Vantage clusters
 
 Clusters are derived, not declared:
-1. Each observer's rows carry an H3 cell at resolution 2, and first-byte histograms per orchestrator.
+1. Each observer's rows carry an H3 cell at resolution 2, and header-time histograms per orchestrator.
 2. The scorer clusters observers by their latency to orchestrators they have in common, with a stable algorithm and a published seed.
 
 An attested discovery view maps its own position to a cluster, and uses that cluster's scores.
@@ -580,6 +588,8 @@ Each score shard names:
 | livepeer-node discovery | Its `Nodes` list includes a view | None | B |
 | Direct SDK users | Read the view; the SDK tries runners in the order given | None | B |
 | Explorer | Public API | None | A |
+
+**Size limit.** The remote signer and livepeer-node's discovery service read at most 1 MiB from each source (`discovery/shared/inventory.go`). By Builder Core's estimate that is about 2,000 runner records, and fewer once records are signed. A view that serves them the whole network fits today, but would not at ten times today's size. Such a view should serve only the runner apps its consumer uses, or only the candidates that pass its filter, unless the limit is raised upstream. Builder Core reads up to 16 MiB from a source (`LPB_DISCOVERY_MAX_BYTES`), so it is not affected.
 
 ### 7.5 Safety rails
 
@@ -617,7 +627,8 @@ These are proposed numbers for the LIP discussion, not facts.
 | API keys, allocations and customers | Never published. A gateway publishes only a coarsened count of paying keys. | Ingest allowlist |
 | Business volume | Publication policy: `full`, `delayed` or `coarse` | Agent |
 | Orchestrator, gateway and node addresses | Public by design | — |
-| Runner IDs, runner app names and versions | Already public in discovery | — |
+| App IDs, runner app names and versions | Already public in discovery | — |
+| Runner IDs | Not published. Discovery does not show them, and a runner's operator may choose them freely. An inventory record only groups the apps that share a runner. | Agent |
 | Rand hash prefixes | Published. They reveal the number and timing of sessions between a gateway and an orchestrator, not who the application is. | — |
 | Client tags | Published by the application only. The gateway publishes hashes that cannot be linked across sessions. | Batteries and agent |
 
@@ -671,7 +682,7 @@ Cloud SPE carries most of the first-operator load. That is why the second relay,
 |---|---|
 | The selection policy plugin | Shadow logging, then weighting, for every Builder Core application |
 | Agents for ChatLPT and inference-gateway | The first application publishers |
-| Builder Core's first-byte and rand hash additions | Inputs for application records |
+| Builder Core's first-byte time on streams, and the rand hash on attempts | Inputs for application records |
 | Onboarding for new applications | Agent, view and plugin set up as part of joining |
 | Possibly a shared approval labeler | Open (Appendix C, question 1) |
 
@@ -800,6 +811,7 @@ Each publisher writes about 300 records a day: 288 five-minute summaries, plus i
 - **ClickHouse** handles the 100× row count on a modest cluster.
 - **Relays and Tap** are designed for Bluesky's network, which is several orders of magnitude larger.
 - **The scorer** at 100× shards by work key and cluster, which the record keys already allow.
+- **Attested discovery views** that feed the remote signer or livepeer-node's discovery service reach those components' 1 MiB limit per source at a few thousand runner records, well before 10× ([§7.4](#74-how-scores-reach-selection)). They serve narrower inventories, or the limit is raised upstream.
 
 The parts that do not scale by adding hardware are:
 - **Adoption,** by applications and orchestrators. The agent's simplicity, and the first benefit to each publisher, are the levers.
@@ -835,31 +847,42 @@ gantt
   section M0 Decide and de-risk
   Spikes, decisions, quotes                     :m0, 2026-11-16, 3w
   section A0 Publish without upstream changes
-  Agent v0 with gateway and application modes   :a0a, after m0, 6w
+  Agent v0 with gateway mode                    :a0a, after m0, 6w
   Chain indexer, identity, relay and Tap        :a0b, after m0, 6w
   Orchestrator mode from metrics                :a0c, after a0a, 3w
   Prober and canary service                     :a0d, after m0, 6w
+  Application mode on Builder Core's feed       :a0g, 2027-01-04, 4w
   Warehouse ingest and parity report            :a0e, after a0a, 4w
   lr-v1 shadow scorer and plugin                :a0f, after a0e, 3w
   section A1 Upstream changes
   Issues, then pull requests                    :a1a, 2026-11-23, 16w
   Agent reads outbox and new fields             :a1b, after a1a, 3w
   section Phase A evaluation
-  Shadow evaluation, at least 4 weeks           :ev, 2027-02-22, 6w
+  Shadow evaluation, at least 4 weeks           :ev, after a0f, 6w
   LIP draft and discussion                      :lip, 2027-01-11, 12w
   section Phase B
-  View filtering with safety rails              :b, 2027-04-12, 8w
+  View filtering with safety rails              :b, after ev, 8w
 ```
 
-The dates are a proposal anchored to 2026-11-03. Upstream review sets A1's real timeline, and nobody in the pilot controls it.
+The dates are a proposal anchored to 2026-11-04. Two outside dependencies set when each agent mode can start:
+- **Application and prober modes** read Builder Core's events feed, which arrives in its M4 (ending 18 December 2026). The pilot also assumes M5 (ending 31 December). Application mode therefore starts on 4 January 2027. The prober and canary service are built from December, and publish once application mode works.
+- **Orchestrator mode** reads metrics that no livepeer-node release yet includes. It needs the first release after v1.0.6, run by the volunteer orchestrators.
+
+Gateway mode, the chain indexer and the aggregator depend on neither, so A0 starts with them. Upstream review sets A1's real timeline, and nobody in the pilot controls it.
 
 **Gate M0 → A0**
 - The identity spike has passed: a `did:plc` and binding verified end to end, including key rotation.
 - The repository host spike has passed: the indigo relay and Tap sync from the agent's minimal host. Otherwise the agent ships against the community PDS first.
 - The experimental NSID authority is registered.
 - Cloud SPE's hosting is approved in scope and budget, per the Build Track rule.
-- Builder Core's events feed is available to the pilot applications.
 - Issues for the A1 changes are open upstream.
+
+**Gate for application and prober modes**
+- Builder Core's M4 has shipped, with the events feed, and the pilot applications run it.
+- Each pilot application has issued its agent an auditor's credential.
+
+**Gate for orchestrator mode**
+- A livepeer-node release includes the metrics and app registrations, and at least one volunteer orchestrator runs it.
 
 **Gate A0 → Phase A evaluation**
 - ChatLPT, inference-gateway and their gateways have published for two weeks, with at least 99% of expected windows present.
@@ -889,7 +912,7 @@ The dates are a proposal anchored to 2026-11-03. Upstream review sets A1's real 
 | Milestone | Deliverables |
 |---|---|
 | **M0** (3 weeks) | Identity spike; repository host spike; service-URI census across both registries; ClickHouse and RPC quotes; experimental NSID; Lexicon v0 from Appendix A; upstream issues for the A1 changes; Cloud SPE hosting approval request |
-| **A0** | Agent v0.1 (gateway and application modes, publication policy, community-PDS client), then v0.2 (minimal repository host, orchestrator mode from metrics, prober mode, attested discovery view). Chain indexer v1. Identity service v1. Relay #1. Ingest into ClickHouse. Parity report. `lr-v1` shadow scorer with recompute in CI. Labeler v1 (`cap-`, `nocap-`, `tls-unverified`, `binding-invalid`). Selection policy plugin in shadow mode. Builder Core first-byte time. Community PDS. Documentation for every role. |
+| **A0** | Agent v0.1 (gateway mode, publication policy, community-PDS client), then v0.2 (application and prober modes on Builder Core's events feed, orchestrator mode from metrics, minimal repository host, attested discovery view). Chain indexer v1. Identity service v1. Relay #1. Ingest into ClickHouse. Parity report. `lr-v1` shadow scorer with recompute in CI. Labeler v1 (`cap-`, `nocap-`, `tls-unverified`, `binding-invalid`). Selection policy plugin in shadow mode. Builder Core first-byte time on streams. Community PDS. Documentation for every role. |
 | **A1** | The upstream changes as they ship ([Appendix B §B.11](appendix-b-change-list.md#b11-proposing-the-upstream-changes)). Agent support for the session outbox and the new signer fields. Rand hash on Builder Core attempts. Three-way matching. Mirror #1, plus a partner's mirror. |
 | **Evaluation** | Weekly shadow reports; public API v1; Explorer integration; LIP draft; cold archive v1 |
 | **B** | View filtering with safety rails; a second scorer onboarded; signed runner records and challenges verified by the SDK and the signer |
@@ -903,13 +926,13 @@ The changes, their order and their standalone value are in [Appendix B](appendix
 
 | # | Change | Owner | Phase |
 |---|---|---|---|
-| U-1 | Signer event fields: runner ID, face value, win probability | livepeer-node | A1 |
+| U-1 | Signer event fields: face value, win probability | livepeer-node | A1 |
 | U-2 | Rand hash on Batteries usage rows | Batteries | A1 |
 | U-3 | Orchestrator session outbox | livepeer-node | A1 |
 | U-4 | Signed runner records in discovery | livepeer-node | A1 |
 | U-5 | Signed payment challenges, verified by the signer | livepeer-node | A1 |
-| U-6 | Stable runner identity | livepeer-node | B |
-| BC-1 | First-byte time on attempts | Builder Core | A0 |
+| U-6 | Stable runner and app identity | livepeer-node | B |
+| BC-1 | First-byte time on streams. Time to response headers already exists (#89). | Builder Core | A0 |
 | BC-2 | Rand hash on attempt sessions | Builder Core | A1, after U-2 |
 | BC-3 | Selection policy plugin | Builder Core plugin | A0 (shadow) |
 | S-1 | Verify signed runner records and challenges | SDK | A1, after U-4 and U-5 |
@@ -984,10 +1007,12 @@ Two rules apply throughout:
 8. **No free text**, fuzzed: arbitrary strings injected into identifier fields are rejected, not published.
 9. **Paging:** a record that would exceed 800 KB is split into pages whose rows add up to the unsplit record.
 10. **Schema compatibility:** every record validates against the current schema and against the previous published version.
-11. **Attested discovery view:** its output parses in Builder Core's discovery client, the signer and the SDK. Each safety rail has its own test: stale scores fail open, the candidate floor holds, the exploration share stays within bounds under a seeded random source, and the rate-of-change cap holds.
+11. **Attested discovery view:** its output parses in Builder Core's discovery client, the signer and the SDK, and an output for the signer stays under 1 MiB. Each safety rail has its own test: stale scores fail open, the candidate floor holds, the exploration share stays within bounds under a seeded random source, and the rate-of-change cap holds.
+12. **App registrations:** two apps registered by one runner produce two runner rows and one `runnerGroup` in the inventory. A client row and an orchestrator row for the same app ID match, and no runner ID appears in any record.
+13. **Events feed resync:** applying the same event twice changes nothing. A 410 from the feed triggers a rebuild from the job history, and the rebuilt windows equal the ones built from the uninterrupted feed.
 
 Three further suites run outside the inner loop:
-- **Contract tests.** Each input adapter is tested against the real upstream at a pinned version: livepeer-node's metrics and discovery, the signer's events through Batteries' broker, and Builder Core's events feed. The same tests run against the fakes used in unit tests, so a fake that drifts from the real system fails.
+- **Contract tests.** Each input adapter is tested against the real upstream at a pinned version: livepeer-node's metrics and discovery from the first release after v1.0.6, the signer's events through Batteries' broker, and Builder Core's events feed from its M4. The same tests run against the fakes used in unit tests, so a fake that drifts from the real system fails.
 - **Repository conformance.** Nightly, an indigo relay and Tap sync from the agent's repository host. The suite checks backfill, live sync, a resync after a gap, and key rotation.
 - **Soak.** Seven days at ten times a busy gateway's event rate, under 100 MB of RAM.
 
@@ -1029,10 +1054,10 @@ Payment rows must match exactly. Quality rows have the tolerances the proposal g
 
 | # | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|---|
-| K1 | Upstream changes to livepeer-node or Batteries stall | Medium | High | A0 needs none of them; each change is small and standalone; issues framed by operator value; a time-limited decision on branch builds |
+| K1 | Upstream changes to livepeer-node or Batteries stall, or a release is slow to come | Medium | High | A0 needs none of the changes, only the next livepeer-node release, which ships code already merged; gateway mode does not wait for it; each change is small and standalone; issues framed by operator value; a time-limited decision on branch builds |
 | K2 | Applications decline to publish | Medium | High | Publication modes (R8); probers cover every orchestrator; applications get shared scores and labels whether or not they publish |
 | K3 | Few orchestrators publish | Medium | Medium | Application and probe records score orchestrators without them; bounties; per-payer accounting as the operator's own benefit |
-| K4 | Builder Core's events feed slips | Low | High | The plan assumes M1 to M5; as a fallback, the agent reads the application's attempt and cost tables read-only |
+| K4 | Builder Core's events feed slips again: it has already moved from M3 to M4, and its design questions are still open | Medium | High | Application mode starts after M5. As a fallback, the agent polls Builder Core's paged job history (`GET /v1/jobs`, delivered in M3) and each job's cost, with an auditor's credential, rather than reading Builder Core's tables |
 | K5 | The minimal repository host is harder than expected | Medium | Medium | Fall back to the community PDS; the agent's PDS client mode ships first |
 | K6 | AT Protocol changes: sync, Lexicon resolution, PLC governance; Tap is still in beta | Medium | Medium | Pinned indigo and Tap versions; conformance CI; Ethereum-rooted trust makes PLC replaceable |
 | K7 | Scores are gamed | Medium | High | Redemption anchoring, weighting, labels, quorum, rate-of-change caps, the exploration share |
@@ -1044,6 +1069,7 @@ Payment rows must match exactly. Quality rows have the tolerances the proposal g
 | K13 | Readers treat telemetry, or an absent `secret-misuse` label, as proof that an orchestrator protects workload confidentiality | Medium | High | The explicit non-goal (proposal §12); label documentation states that absence is not evidence; sensitive applications use `approved` orchestrators until attestation exists |
 | K14 | Probes become recognizable, so integrity checks see only honest behavior | Medium | Medium | Canaries shaped like real secrets, a shared gateway, rotating deposits, `probe-special-treatment` comparisons |
 | K15 | The two service registries disagree about an orchestrator | Medium | Low | The identity service reads both and records conflicts; inventory records are tied to bindings |
+| K16 | livepeer-node changes how it identifies runners or apps again, as #44 did, before the Lexicons are adopted | Medium | Low | The agent's input adapters isolate the source models; contract tests pin releases; the pilot publishes under experimental names, so a schema change before the LIP costs a migration, not a breaking change |
 
 ---
 
@@ -1063,12 +1089,12 @@ The design's decisions are recorded in [Appendix C](appendix-c-decisions-and-ope
 
 ## 16. Status of the proposal documents
 
-| Document | Status, 2026-11-03 |
+| Document | Status, 2026-11-04 |
 |---|---|
-| Proposal (README) | Revised for livepeer-node, Batteries and Builder Core |
-| Appendix A: record schemas | Revised |
-| Appendix B: change list | Revised |
-| Appendix C: decisions and open questions | Revised; D18 to D31 added |
+| Proposal (README) | Revised for livepeer-node, Batteries and Builder Core; updated for app registrations |
+| Appendix A: record schemas | Revised; rows keyed by app registration, client header times added |
+| Appendix B: change list | Revised; code references at livepeer/node `833dc2e` and Builder Core `releases/m3` |
+| Appendix C: decisions and open questions | Revised; D18 to D37 added |
 | Appendix D: sequence diagrams | Revised |
 | AT Protocol primer | Revised: `did:plc` with the binding, hosting modes, Spaces, Tap, the Lexicon evolution rule, labels |
 
@@ -1083,9 +1109,9 @@ The design's decisions are recorded in [Appendix C](appendix-c-decisions-and-ope
 - AT Protocol Spaces alpha: <https://atproto.com/blog/atproto-spaces-alpha>
 - Cocoon (Go PDS): <https://github.com/haileyok/cocoon>
 - rsky-pds `did:plc`-only issue: <https://github.com/blacksky-algorithms/rsky/issues/296>
-- Code and documents reviewed on 2026-11-03:
-  - livepeer/node at `e2b3319`, including `docs/metrics.md`, `docs/discovery.md` and `docs/http-api.md`;
+- Code and documents reviewed on 2026-11-03, and checked again on 2026-11-04:
+  - livepeer/node at `833dc2e`, including `docs/metrics.md`, `docs/discovery.md` and `docs/http-api.md`, and its releases (newest v1.0.6, 2026-10-27);
   - Clearinghouse Batteries at `d47d1ff`;
-  - livepeer-builder (Builder Core) at `016c65d`, including its engine, payments, discovery and events contracts;
-  - livepeer-python-gateway at `cd6ed5e`;
+  - livepeer-builder (Builder Core) at `3520a38` on `releases/m3`, including its engine, payments, discovery and events contracts, the M4 and M5 guides, and the ISS-46 events feed guide;
+  - livepeer-python-gateway at `2017a80` (upstream main);
   - inference-gateway and ChatLPT, including inference-gateway's capability probe results of 2026-10-26.
